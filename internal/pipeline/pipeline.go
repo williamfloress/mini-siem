@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/williamfloress/mini-siem/internal/detector"
 	"github.com/williamfloress/mini-siem/internal/event"
 )
 
@@ -14,18 +15,30 @@ type Store interface {
 	Add(e event.Event) event.Event
 }
 
-type Pipeline struct {
-	queue  chan event.Event
-	store  Store
-	logger *slog.Logger
-	wg     sync.WaitGroup
+type Detector interface {
+	Check(e event.Event) *detector.Alert
 }
 
-func New(store Store, logger *slog.Logger, queueSize int) *Pipeline {
+type AlertSink interface {
+	Add(a detector.Alert)
+}
+
+type Pipeline struct {
+	queue    chan event.Event
+	store    Store
+	detector Detector
+	alerts   AlertSink
+	logger   *slog.Logger
+	wg       sync.WaitGroup
+}
+
+func New(store Store, det Detector, alerts AlertSink, logger *slog.Logger, queueSize int) *Pipeline {
 	return &Pipeline{
-		queue:  make(chan event.Event, queueSize),
-		store:  store,
-		logger: logger,
+		queue:    make(chan event.Event, queueSize),
+		store:    store,
+		detector: det,
+		alerts:   alerts,
+		logger:   logger,
 	}
 }
 
@@ -42,6 +55,12 @@ func (p *Pipeline) worker(id int) {
 		saved := p.store.Add(e)
 		p.logger.Info("evento procesado",
 			"worker", id, "id", saved.ID, "type", saved.Type, "ip", saved.IP)
+
+		if a := p.detector.Check(saved); a != nil {
+			p.alerts.Add(*a)
+			p.logger.Warn("ALERTA",
+				"rule", a.Rule, "ip", a.IP, "count", a.Count, "worker", id)
+		}
 	}
 }
 

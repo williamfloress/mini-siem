@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/williamfloress/mini-siem/internal/api"
+	"github.com/williamfloress/mini-siem/internal/detector"
 	"github.com/williamfloress/mini-siem/internal/pipeline"
 	"github.com/williamfloress/mini-siem/internal/store"
 )
@@ -19,10 +20,13 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 	memStore := store.NewMemoryStore()
-	pipe := pipeline.New(memStore, logger, 1000)
+	alertStore := store.NewAlertStore()
+	det := detector.NewBruteForce(5, time.Minute, 5*time.Minute)
+
+	pipe := pipeline.New(memStore, det, alertStore, logger, 1000)
 	pipe.Start(4)
 
-	router := api.NewRouter(memStore, pipe, logger)
+	router := api.NewRouter(memStore, alertStore, pipe, logger)
 	srv := &http.Server{Addr: ":8080", Handler: router}
 
 	go func() {

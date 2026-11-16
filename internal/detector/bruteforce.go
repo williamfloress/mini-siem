@@ -9,6 +9,7 @@ import (
 )
 
 type Alert struct {
+	ID          int64     `json:"id"`
 	Rule        string    `json:"rule"`
 	IP          string    `json:"ip"`
 	Count       int       `json:"count"`

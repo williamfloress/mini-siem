@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -12,11 +13,11 @@ import (
 )
 
 type EventLister interface {
-	List(limit int) []event.Event
+	List(ctx context.Context, limit int) ([]event.Event, error)
 }
 
 type AlertLister interface {
-	List(limit int) []detector.Alert
+	List(ctx context.Context, limit int) ([]detector.Alert, error)
 }
 
 type EventSubmitter interface {
@@ -88,7 +89,12 @@ func (h *Handler) listEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, h.events.List(limit))
+	events, err := h.events.List(r.Context(), limit)
+	if err != nil {
+		h.internalError(w, "listar eventos", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, events)
 }
 
 func (h *Handler) listAlerts(w http.ResponseWriter, r *http.Request) {
@@ -97,7 +103,19 @@ func (h *Handler) listAlerts(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, h.alerts.List(limit))
+	alerts, err := h.alerts.List(r.Context(), limit)
+	if err != nil {
+		h.internalError(w, "listar alertas", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, alerts)
+}
+
+// internalError registra el detalle y responde un mensaje genérico: el error de la BD
+// puede revelar nombres de tablas o de host que el cliente no necesita ver.
+func (h *Handler) internalError(w http.ResponseWriter, op string, err error) {
+	h.logger.Error("error interno", "op", op, "error", err)
+	writeError(w, http.StatusInternalServerError, "error interno")
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

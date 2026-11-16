@@ -9,18 +9,22 @@ import (
 	"github.com/williamfloress/mini-siem/internal/event"
 )
 
-type EventStore interface {
-	Add(e event.Event) event.Event
+type EventLister interface {
 	List(limit int) []event.Event
 }
 
-type Handler struct {
-	store  EventStore
-	logger *slog.Logger
+type EventSubmitter interface {
+	Submit(e event.Event) error
 }
 
-func NewRouter(store EventStore, logger *slog.Logger) http.Handler {
-	h := &Handler{store: store, logger: logger}
+type Handler struct {
+	lister    EventLister
+	submitter EventSubmitter
+	logger    *slog.Logger
+}
+
+func NewRouter(lister EventLister, submitter EventSubmitter, logger *slog.Logger) http.Handler {
+	h := &Handler{lister: lister, submitter: submitter, logger: logger}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.health)
@@ -49,10 +53,13 @@ func (h *Handler) createEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	saved := h.store.Add(e)
-	h.logger.Info("evento recibido",
-		"id", saved.ID, "source", saved.Source, "type", saved.Type, "ip", saved.IP)
-	writeJSON(w, http.StatusCreated, saved)
+	if err := h.submitter.Submit(e); err != nil {
+		h.logger.Warn("cola llena, evento rechazado", "ip", e.IP)
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusServiceUnavailable, "servidor ocupado, reintente")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
 }
 
 func (h *Handler) listEvents(w http.ResponseWriter, r *http.Request) {
@@ -65,7 +72,7 @@ func (h *Handler) listEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
-	writeJSON(w, http.StatusOK, h.store.List(limit))
+	writeJSON(w, http.StatusOK, h.lister.List(limit))
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

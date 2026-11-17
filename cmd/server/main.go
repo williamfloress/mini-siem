@@ -35,12 +35,37 @@ type alertStore interface {
 }
 
 func main() {
+	// La imagen de Docker no tiene shell ni curl: el HEALTHCHECK usa el propio binario.
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		os.Exit(healthcheck())
+	}
+
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	if err := run(logger); err != nil {
 		logger.Error("el servidor terminó con error", "error", err)
 		os.Exit(1)
 	}
 	logger.Info("apagado completo")
+}
+
+// healthcheck consulta /healthz en el puerto local y devuelve 0 si responde 200.
+func healthcheck() int {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	client := http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get("http://127.0.0.1:" + port + "/healthz")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "healthcheck:", err)
+		return 1
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintln(os.Stderr, "healthcheck: status", resp.StatusCode)
+		return 1
+	}
+	return 0
 }
 
 func run(logger *slog.Logger) error {

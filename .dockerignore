@@ -1,0 +1,11 @@
+# Solo hace falta el código para compilar. Esto acelera el build y evita
+# que credenciales (.env) o el historial de Git terminen dentro de la imagen.
+.git
+.github
+.env
+*.exe
+/bin/
+ROADMAP.md
+README.md
+Dockerfile
+docker-compose.yml

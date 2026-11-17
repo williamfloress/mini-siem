@@ -1,4 +1,26 @@
+# docker compose up --build    -> levanta todo: app en http://localhost:8080 + PostgreSQL
+# docker compose up -d postgres -> solo la base, para desarrollar con `go run ./cmd/server`
+
 services:
+  app:
+    build: .
+    image: mini-siem:latest
+    ports:
+      - "8080:8080"
+    # .env es opcional: de ahí salen INGEST_API_KEY, Telegram, umbrales, etc.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Tiene prioridad sobre env_file: dentro de la red de compose la base es "postgres:5432",
+      # no el localhost:5433 que usa .env para desarrollo.
+      DATABASE_URL: postgres://siem:siem@postgres:5432/siem?sslmode=disable
+      PORT: "8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
   postgres:
     image: postgres:17-alpine
     environment:

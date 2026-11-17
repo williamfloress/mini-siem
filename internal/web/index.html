@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mini-siem</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M8 1 2 3.5v4C2 11 4.6 14 8 15c3.4-1 6-4 6-7.5v-4Z' fill='%23d9534f'/></svg>">
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --panel: #ffffff;
+    --text: #1c2230;
+    --muted: #667085;
+    --border: #e3e6eb;
+    --row-hover: #f8f9fb;
+    --bar: #c9d3e3;
+    --bar-fail: #e8907f;
+    --ok: #1f9d55;
+    --warn: #c77700;
+    --danger: #c9302c;
+    --info: #3d63c9;
+    --chip-warn-bg: #fff3dc;
+    --chip-danger-bg: #fde4e3;
+    --chip-info-bg: #e5ecfb;
+    --chip-neutral-bg: #eef0f3;
+    --new: #fff8e1;
+    --mono: ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f131a;
+      --panel: #171c25;
+      --text: #e4e8ef;
+      --muted: #8b95a7;
+      --border: #262d3a;
+      --row-hover: #1c2230;
+      --bar: #34405a;
+      --bar-fail: #a5503f;
+      --ok: #3ccf7f;
+      --warn: #f0a83a;
+      --danger: #ff6b66;
+      --info: #7c9cff;
+      --chip-warn-bg: #3a2c12;
+      --chip-danger-bg: #3d1a1a;
+      --chip-info-bg: #1c2847;
+      --chip-neutral-bg: #232a36;
+      --new: #2e2a17;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 14px 24px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 17px; margin: 0; letter-spacing: -0.01em; }
+  header h1 span { color: var(--muted); font-weight: 400; }
+  .status { margin-left: auto; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.live { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent); }
+  .dot.down { background: var(--danger); }
+  button {
+    font: inherit; font-size: 13px; color: var(--text);
+    background: transparent; border: 1px solid var(--border); border-radius: 6px;
+    padding: 3px 10px; cursor: pointer;
+  }
+  button:hover { background: var(--row-hover); }
+
+  main {
+    display: grid; gap: 16px;
+    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+    padding: 20px 24px; max-width: 1400px; margin: 0 auto;
+  }
+  .full { grid-column: 1 / -1; }
+  @media (max-width: 900px) {
+    main { grid-template-columns: minmax(0, 1fr); padding: 16px; }
+    header { padding: 12px 16px; }
+    .error-banner { margin: 16px 16px 0; }
+    /* En pantallas angostas la tabla se desplaza dentro de su panel en vez de
+       aplastar las columnas de texto a una palabra por línea. */
+    table { min-width: 640px; }
+    .status { margin-left: 0; width: 100%; }
+  }
+
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  section > h2 {
+    display: flex; align-items: center; gap: 8px;
+    margin: 0; padding: 12px 16px; font-size: 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  section > h2 small { color: var(--muted); font-weight: 400; }
+  section > h2 .tools { margin-left: auto; display: flex; gap: 4px; }
+  .tools button[aria-pressed="true"] { background: var(--chip-neutral-bg); font-weight: 600; }
+  .scroll { max-height: 420px; overflow: auto; }
+
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 7px 16px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-weight: 500; font-size: 12px; }
+  tr:last-child td { border-bottom: 0; }
+  tbody tr:hover td { background: var(--row-hover); }
+  tr.new td { background: var(--new); transition: background 2s; }
+  td.ip, td.mono { font-family: var(--mono); font-size: 13px; white-space: nowrap; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.time { white-space: nowrap; color: var(--muted); font-size: 13px; }
+  td.msg { color: var(--muted); word-break: break-word; min-width: 200px; }
+
+  .chip { display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .chip.danger { color: var(--danger); background: var(--chip-danger-bg); }
+  .chip.warn { color: var(--warn); background: var(--chip-warn-bg); }
+  .chip.info { color: var(--info); background: var(--chip-info-bg); }
+  .chip.neutral { color: var(--muted); background: var(--chip-neutral-bg); font-weight: 500; }
+
+  .bar { position: relative; height: 18px; min-width: 120px; }
+  .bar span { position: absolute; inset: 0 auto 0 0; border-radius: 3px; }
+  .bar .total { background: var(--bar); }
+  .bar .fail { background: var(--bar-fail); }
+  .legend { display: flex; gap: 14px; padding: 8px 16px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--border); }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+
+  .empty { padding: 28px 16px; text-align: center; color: var(--muted); }
+  .error-banner {
+    display: none; margin: 16px 24px 0; padding: 10px 14px; border-radius: 8px;
+    color: var(--danger); background: var(--chip-danger-bg); font-size: 13px;
+  }
+  .error-banner.show { display: block; }
+</style>
+</head>
+<body>
+<header>
+  <h1>mini-siem <span>· panel</span></h1>
+  <div class="status">
+    <span class="dot" id="dot"></span>
+    <span id="status">conectando…</span>
+    <button id="pause" type="button">Pausar</button>
+  </div>
+</header>
+
+<div class="error-banner" id="error" role="alert"></div>
+
+<main>
+  <section class="full">
+    <h2>Alertas <small id="alerts-count"></small></h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Cuándo</th><th>Regla</th><th>IP</th><th class="num">Eventos</th><th>Detalle</th></tr></thead>
+        <tbody id="alerts"></tbody>
+      </table>
+      <div class="empty" id="alerts-empty" hidden>Sin alertas. Todo tranquilo.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Eventos recientes <small id="events-count"></small></h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Cuándo</th><th>Origen</th><th>Tipo</th><th>IP</th><th>Usuario</th></tr></thead>
+        <tbody id="events"></tbody>
+      </table>
+      <div class="empty" id="events-empty" hidden>Todavía no llegó ningún evento.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>
+      Top IPs
+      <span class="tools" role="group" aria-label="Periodo">
+        <button type="button" data-window="1h">1 h</button>
+        <button type="button" data-window="24h" aria-pressed="true">24 h</button>
+        <button type="button" data-window="168h">7 d</button>
+      </span>
+    </h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>IP</th><th style="width:45%">Actividad</th><th class="num">Eventos</th><th class="num">Fallidos</th></tr></thead>
+        <tbody id="ips"></tbody>
+      </table>
+      <div class="empty" id="ips-empty" hidden>Sin actividad en este periodo.</div>
+    </div>
+    <div class="legend">
+      <span><i style="background:var(--bar)"></i>eventos</span>
+      <span><i style="background:var(--bar-fail)"></i>logins fallidos</span>
+    </div>
+  </section>
+</main>
+
+<script>
+"use strict";
+
+const REFRESH_MS = 5000;
+
+const RULES = {
+  possible_compromise: { label: "Cuenta comprometida", tone: "danger" },
+  brute_force:         { label: "Fuerza bruta",        tone: "warn" },
+  http_404_scan:       { label: "Escaneo 404",         tone: "info" },
+};
+
+const state = { window: "24h", paused: false, seenAlerts: null, timer: null };
+const $ = (id) => document.getElementById(id);
+
+// Construye elementos con textContent: el contenido de los eventos lo controla quien
+// los envía (un atacante incluido), así que nunca se inserta como HTML.
+function el(tag, props = {}, children = []) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === "text") node.textContent = v;
+    else if (k === "class") node.className = v;
+    else node.setAttribute(k, v);
+  }
+  for (const c of children) node.append(c);
+  return node;
+}
+
+function relTime(iso) {
+  const s = Math.round((Date.now() - new Date(iso)) / 1000);
+  if (s < 0) return "en el futuro";
+  if (s < 60) return `hace ${s} s`;
+  if (s < 3600) return `hace ${Math.floor(s / 60)} min`;
+  if (s < 86400) return `hace ${Math.floor(s / 3600)} h`;
+  return `hace ${Math.floor(s / 86400)} d`;
+}
+
+function timeCell(iso) {
+  const d = new Date(iso);
+  return el("td", { class: "time", title: d.toLocaleString() + " · " + relTime(iso),
+    text: d.toLocaleString(undefined, { dateStyle: "short", timeStyle: "medium" }) });
+}
+
+function fill(tbodyId, emptyId, rows) {
+  $(tbodyId).replaceChildren(...rows);
+  $(emptyId).hidden = rows.length > 0;
+}
+
+async function getJSON(path) {
+  const res = await fetch(path, { cache: "no-store" });
+  if (!res.ok) {
+    let msg = `${res.status}`;
+    try { msg += " " + (await res.json()).error; } catch {}
+    throw new Error(`${path}: ${msg}`);
+  }
+  return res.json();
+}
+
+function renderAlerts(alerts) {
+  const newest = [...alerts].reverse();
+  const first = state.seenAlerts === null;
+  const seen = state.seenAlerts ?? new Set();
+  fill("alerts", "alerts-empty", newest.map((a) => {
+    const rule = RULES[a.rule] ?? { label: a.rule, tone: "neutral" };
+    const row = el("tr", {}, [
+      timeCell(a.triggered_at),
+      el("td", {}, [el("span", { class: `chip ${rule.tone}`, text: rule.label })]),
+      el("td", { class: "ip", text: a.ip }),
+      el("td", { class: "num", text: String(a.count) }),
+      el("td", { class: "msg", text: a.message }),
+    ]);
+    if (!first && !seen.has(a.id)) row.className = "new";
+    return row;
+  }));
+  state.seenAlerts = new Set(alerts.map((a) => a.id));
+  $("alerts-count").textContent = alerts.length ? `· últimas ${alerts.length}` : "";
+}
+
+function renderEvents(events) {
+  const newest = [...events].reverse();
+  fill("events", "events-empty", newest.map((e) => el("tr", {}, [
+    timeCell(e.timestamp),
+    el("td", {}, [el("span", { class: "chip neutral", text: e.source })]),
+    el("td", { class: "mono", text: e.type }),
+    el("td", { class: "ip", text: e.ip }),
+    el("td", { class: "msg", text: e.user || "—", title: e.message || "" }),
+  ])));
+  $("events-count").textContent = events.length ? `· últimos ${events.length}` : "";
+}
+
+function renderIPs(ips) {
+  const max = Math.max(1, ...ips.map((r) => r.events));
+  fill("ips", "ips-empty", ips.map((r) => el("tr", { title: "Última vez: " + new Date(r.last_seen).toLocaleString() }, [
+    el("td", { class: "ip", text: r.ip }),
+    el("td", {}, [el("div", { class: "bar" }, [
+      el("span", { class: "total", style: `width:${(r.events / max) * 100}%` }),
+      el("span", { class: "fail", style: `width:${(r.failed_logins / max) * 100}%` }),
+    ])]),
+    el("td", { class: "num", text: String(r.events) }),
+    el("td", { class: "num", text: String(r.failed_logins) }),
+  ])));
+}
+
+function setStatus(ok, text) {
+  $("dot").className = "dot " + (state.paused ? "" : ok ? "live" : "down");
+  $("status").textContent = text;
+}
+
+async function refresh() {
+  try {
+    const [alerts, events, stats] = await Promise.all([
+      getJSON("/alerts?limit=100"),
+      getJSON("/events?limit=100"),
+      getJSON(`/stats/top-ips?limit=10&window=${state.window}`),
+    ]);
+    renderAlerts(alerts);
+    renderEvents(events);
+    renderIPs(stats.ips);
+    $("error").classList.remove("show");
+    setStatus(true, state.paused ? "en pausa" : "en vivo · " + new Date().toLocaleTimeString());
+  } catch (err) {
+    $("error").textContent = "No se pudo actualizar el panel: " + err.message;
+    $("error").classList.add("show");
+    setStatus(false, "sin conexión");
+  }
+}
+
+function schedule() {
+  clearInterval(state.timer);
+  if (!state.paused && !document.hidden) state.timer = setInterval(refresh, REFRESH_MS);
+}
+
+$("pause").addEventListener("click", () => {
+  state.paused = !state.paused;
+  $("pause").textContent = state.paused ? "Reanudar" : "Pausar";
+  if (!state.paused) refresh();
+  setStatus(true, state.paused ? "en pausa" : "reanudando…");
+  schedule();
+});
+
+document.querySelectorAll("[data-window]").forEach((btn) => btn.addEventListener("click", () => {
+  state.window = btn.dataset.window;
+  document.querySelectorAll("[data-window]").forEach((b) => b.setAttribute("aria-pressed", String(b === btn)));
+  refresh();
+}));
+
+// Sin pestaña visible no se consulta la API.
+document.addEventListener("visibilitychange", () => { if (!document.hidden && !state.paused) refresh(); schedule(); });
+
+refresh();
+schedule();
+</script>
+</body>
+</html>

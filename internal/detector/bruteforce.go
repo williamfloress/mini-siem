@@ -17,57 +17,65 @@ type Alert struct {
 	Message     string    `json:"message"`
 }
 
-type BruteForce struct {
+// Threshold es una regla genérica: alerta cuando una IP acumula threshold eventos
+// que cumplen match dentro de window, y luego calla durante cooldown.
+// La fuerza bruta y el escaneo de 404 son dos configuraciones de esta misma regla.
+type Threshold struct {
 	mu        sync.Mutex
+	rule      string
+	match     func(event.Event) bool
+	describe  func(count int, ip string, window time.Duration) string
 	threshold int
-	window    time.Duration
-	cooldown  time.Duration
-	attempts  map[string][]time.Time
-	lastAlert map[string]time.Time
+	window    *slidingWindow
+	cooldown  *cooldown
 }
 
-func NewBruteForce(threshold int, window, cooldown time.Duration) *BruteForce {
-	return &BruteForce{
-		threshold: threshold,
-		window:    window,
-		cooldown:  cooldown,
-		attempts:  make(map[string][]time.Time),
-		lastAlert: make(map[string]time.Time),
-	}
-}
-
-func (d *BruteForce) Check(e event.Event) *Alert {
-	if e.Type != "login_failed" {
+func (d *Threshold) Check(e event.Event) *Alert {
+	if !d.match(e) {
 		return nil
 	}
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	cutoff := e.Timestamp.Add(-d.window)
-	kept := d.attempts[e.IP][:0]
-	for _, t := range d.attempts[e.IP] {
-		if t.After(cutoff) {
-			kept = append(kept, t)
-		}
-	}
-	kept = append(kept, e.Timestamp)
-	d.attempts[e.IP] = kept
-
-	if len(kept) < d.threshold {
+	n := d.window.add(e.IP, e.Timestamp)
+	if n < d.threshold || !d.cooldown.allow(e.IP, e.Timestamp) {
 		return nil
 	}
-	if last, ok := d.lastAlert[e.IP]; ok && e.Timestamp.Sub(last) < d.cooldown {
-		return nil
-	}
-	d.lastAlert[e.IP] = e.Timestamp
-
 	return &Alert{
-		Rule:        "brute_force",
+		Rule:        d.rule,
 		IP:          e.IP,
-		Count:       len(kept),
+		Count:       n,
 		TriggeredAt: e.Timestamp,
-		Message: fmt.Sprintf("%d logins fallidos desde %s en %s",
-			len(kept), e.IP, d.window),
+		Message:     d.describe(n, e.IP, d.window.size),
+	}
+}
+
+// NewBruteForce alerta con threshold logins fallidos desde una IP dentro de window.
+func NewBruteForce(threshold int, window, cooldownPeriod time.Duration) *Threshold {
+	return &Threshold{
+		rule:  "brute_force",
+		match: func(e event.Event) bool { return e.Type == "login_failed" },
+		describe: func(n int, ip string, w time.Duration) string {
+			return fmt.Sprintf("%d logins fallidos desde %s en %s", n, ip, w)
+		},
+		threshold: threshold,
+		window:    newSlidingWindow(window),
+		cooldown:  newCooldown(cooldownPeriod),
+	}
+}
+
+// NewNotFoundScan alerta con threshold respuestas 404 de nginx a una IP dentro de window:
+// alguien está probando rutas a ciegas (/wp-admin, /.env, /phpmyadmin...).
+func NewNotFoundScan(threshold int, window, cooldownPeriod time.Duration) *Threshold {
+	return &Threshold{
+		rule:  "http_404_scan",
+		match: func(e event.Event) bool { return e.Source == "nginx" && e.Type == "http_404" },
+		describe: func(n int, ip string, w time.Duration) string {
+			return fmt.Sprintf("%d respuestas 404 a %s en %s (posible escaneo)", n, ip, w)
+		},
+		threshold: threshold,
+		window:    newSlidingWindow(window),
+		cooldown:  newCooldown(cooldownPeriod),
 	}
 }

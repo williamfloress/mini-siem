@@ -1,10 +1,10 @@
 # mini-siem
 
-Un SIEM pequeño escrito en Go. Recibe eventos de seguridad (logins SSH, peticiones nginx, eventos de aplicación), los procesa en paralelo, detecta patrones sospechosos como ataques de fuerza bruta y genera alertas que se guardan en PostgreSQL.
+Un SIEM pequeño escrito en Go. Recibe eventos de seguridad (logins SSH, peticiones nginx, eventos de aplicación), los procesa en paralelo y detecta patrones sospechosos: fuerza bruta, cuentas posiblemente comprometidas y escaneos de rutas. Las alertas se guardan en PostgreSQL, llegan por Telegram y se ven en un panel web.
 
 Es un proyecto de aprendizaje y portafolio: se construye por fases, desde un servidor HTTP mínimo hasta un sistema desplegado que recibe eventos reales de un servidor Linux.
 
-> **Estado:** fases 0 a 4 completas (ingesta, cola concurrente, detección y persistencia). Las notificaciones, el dashboard, el agente y el despliegue están en desarrollo. Ver [Hoja de ruta](#hoja-de-ruta).
+> **Estado:** fases 0 a 5 completas (ingesta, cola concurrente, detección, persistencia, notificaciones y panel). El empaquetado, el agente y el despliegue están en desarrollo. Ver [Hoja de ruta](#hoja-de-ruta).
 
 ---
 
@@ -20,36 +20,40 @@ flowchart LR
     C --> W3[worker 3]
     C --> W4[worker 4]
     W1 & W2 & W3 & W4 -->|guarda| E[("PostgreSQL<br/>events")]
-    W1 & W2 & W3 & W4 -->|evalúa| D["Detector<br/>fuerza bruta"]
+    W1 & W2 & W3 & W4 -->|evalúa| D["Detectores<br/>fuerza bruta · compromiso · escaneo"]
     D -->|alerta| F[("PostgreSQL<br/>alerts")]
-    E -->|"GET /events"| U[Usuario]
-    F -->|"GET /alerts"| U
+    D -->|"encola (no bloquea)"| N["Notificador<br/>reintentos"]
+    N --> T[Telegram]
+    E & F -->|"GET /events · /alerts · /stats"| P["Panel web<br/>GET /"]
 ```
 
 El recorrido de un evento:
 
 1. **Ingesta.** Un cliente envía el evento en JSON a `POST /events`. La API rechaza los cuerpos mayores de 1 MB, el JSON mal formado, los campos desconocidos y las IPs inválidas.
 2. **Cola.** Si el evento es válido, entra en una cola en memoria y la API responde `202 Accepted` de inmediato, sin esperar a la base de datos. Si la cola está llena, responde `503` con `Retry-After: 1` (contrapresión) para no saturar el sistema.
-3. **Procesamiento.** Cuatro workers concurrentes toman eventos de la cola. Cada uno guarda el evento en PostgreSQL y luego lo pasa por el detector.
-4. **Detección.** El detector lleva, para cada IP, una ventana deslizante con sus logins fallidos. Cuando una IP supera el umbral dentro de la ventana, se genera una alerta.
-5. **Consulta.** `GET /events` y `GET /alerts` devuelven los registros más recientes directamente desde la base de datos, así que los datos sobreviven a los reinicios.
+3. **Procesamiento.** Cuatro workers concurrentes toman eventos de la cola. Cada uno guarda el evento en PostgreSQL y luego lo pasa por cada una de las reglas de detección.
+4. **Detección.** Cada regla lleva, por IP, una ventana deslizante con los eventos que le interesan. Si una IP cruza el umbral, se genera una alerta y se guarda. Un mismo evento puede disparar varias reglas.
+5. **Notificación.** La alerta guardada pasa a un notificador con su propia cola y goroutine, que la envía a Telegram con timeout y reintentos. El worker no espera: si Telegram está lento o caído, los eventos se siguen procesando.
+6. **Consulta.** El panel web (`GET /`) y la API (`GET /events`, `GET /alerts`, `GET /stats/top-ips`) leen de la base de datos, así que los datos sobreviven a los reinicios.
 
-Al recibir `Ctrl+C` o `SIGTERM`, el servidor se apaga en orden: deja de aceptar peticiones, los workers terminan los eventos que quedan en la cola y por último se cierra la conexión con la base.
+Al recibir `Ctrl+C` o `SIGTERM`, el servidor se apaga en orden: deja de aceptar peticiones, los workers terminan los eventos de la cola, el notificador envía las alertas pendientes (hasta 10 s) y por último se cierra la conexión con la base.
 
-### Regla de fuerza bruta
+### Reglas de detección
 
-| Parámetro | Por defecto | Significado |
+| Regla | Qué detecta | Se dispara con (por defecto) |
 |---|---|---|
-| Umbral | 5 | Logins fallidos necesarios para alertar |
-| Ventana | 1 minuto | Periodo en el que se cuentan los intentos |
-| Enfriamiento | 5 minutos | Tiempo sin repetir la alerta para la misma IP |
+| `brute_force` | Ataque de fuerza bruta | 5 `login_failed` desde una IP en 1 minuto. No se repite en 5 minutos |
+| `possible_compromise` | El ataque funcionó: posible cuenta comprometida | Un `login_success` desde una IP con 5 o más `login_failed` en los últimos 10 minutos |
+| `http_404_scan` | Escaneo de rutas (`/wp-admin`, `/.env`…) | 20 eventos `nginx` de tipo `http_404` desde una IP en 1 minuto. No se repite en 10 minutos |
 
-- Solo cuentan los eventos con `type: "login_failed"`.
-- La ventana usa el `timestamp` del evento (cuándo ocurrió), no el momento en que llegó al servidor.
+- Las ventanas usan el `timestamp` del evento (cuándo ocurrió), no el momento en que llegó al servidor.
 - Cada IP se evalúa por separado.
-- El enfriamiento evita una avalancha de alertas durante un ataque largo.
+- El enfriamiento evita una avalancha de alertas durante un ataque largo. `possible_compromise` no lo necesita: después de un login exitoso la racha de fallos se reinicia.
+- `brute_force` y `http_404_scan` son dos configuraciones de la misma regla genérica de umbral (`detector.Threshold`), así que agregar otra regla de "N eventos en T segundos" cuesta unas pocas líneas.
 
-Los tres parámetros se configuran con variables de entorno (ver [Configuración](#configuración)).
+Todos los umbrales, ventanas y enfriamientos se configuran con variables de entorno (ver [Configuración](#configuración)).
+
+**Tipos de evento que entienden las reglas:** `login_failed` y `login_success` (cualquier `source`), y `http_404` (con `source: "nginx"`). Se aceptan otros tipos: se guardan y se ven en el panel, pero ninguna regla los evalúa.
 
 ---
 
@@ -68,6 +72,8 @@ docker compose up -d
 export DATABASE_URL="postgres://siem:siem@localhost:5433/siem?sslmode=disable"
 go run ./cmd/server
 ```
+
+El panel queda en **http://localhost:8080/** y se actualiza cada 5 segundos.
 
 En PowerShell, la variable se define así:
 
@@ -111,6 +117,12 @@ curl -s localhost:8080/alerts
 
 La alerta salta en el quinto intento. El sexto cae dentro del enfriamiento y no genera otra.
 
+Si ahora esa IP inicia sesión con éxito, salta la alerta más grave, `possible_compromise`:
+
+```bash
+curl -s -X POST localhost:8080/events -d '{"timestamp":"2026-11-16T10:00:30Z","source":"ssh","type":"login_success","ip":"203.0.113.7","user":"root"}'
+```
+
 ---
 
 ## API
@@ -145,6 +157,27 @@ Devuelve los últimos `N` eventos (por defecto 50, máximo 500), ordenados del m
 
 Devuelve las últimas `N` alertas, con los mismos límites.
 
+### `GET /stats/top-ips?limit=N&window=D`
+
+Devuelve las IPs con más eventos en el periodo `window` (por defecto `24h`, máximo `720h`), de la más activa a la menos. `limit` va de 1 a 100 (por defecto 10).
+
+```json
+{
+  "window": "24h0m0s",
+  "since": "2026-11-15T16:09:00Z",
+  "ips": [
+    { "ip": "192.0.2.77", "events": 25, "failed_logins": 0, "last_seen": "2026-11-16T16:09:02Z" },
+    { "ip": "198.51.100.23", "events": 7, "failed_logins": 6, "last_seen": "2026-11-16T16:08:58Z" }
+  ]
+}
+```
+
+Se resuelve con un `GROUP BY ip` en PostgreSQL, sin traer los eventos a Go.
+
+### `GET /`
+
+El panel web: alertas, eventos recientes y top IPs, con refresco automático.
+
 ### `GET /healthz`
 
 Responde `{"status":"ok"}` mientras el proceso está vivo.
@@ -164,8 +197,37 @@ Toda la configuración se lee de variables de entorno ([12-factor](https://12fac
 | `BRUTEFORCE_THRESHOLD` | `5` | Logins fallidos para alertar |
 | `BRUTEFORCE_WINDOW` | `1m` | Ventana de conteo (`30s`, `1m`, `2h`…) |
 | `BRUTEFORCE_COOLDOWN` | `5m` | Enfriamiento entre alertas de la misma IP |
+| `COMPROMISE_THRESHOLD` | `5` | Fallos previos para considerar sospechoso un login exitoso |
+| `COMPROMISE_WINDOW` | `10m` | Cuánto tiempo atrás se miran esos fallos |
+| `SCAN_THRESHOLD` | `20` | Respuestas 404 para alertar de escaneo |
+| `SCAN_WINDOW` | `1m` | Ventana de conteo del escaneo |
+| `SCAN_COOLDOWN` | `10m` | Enfriamiento entre alertas de escaneo de la misma IP |
+| `TELEGRAM_BOT_TOKEN` | *(vacía)* | Token del bot. Vacía = sin notificaciones externas |
+| `TELEGRAM_CHAT_ID` | *(vacía)* | Chat que recibe las alertas. Va junto con el token |
 
 Si hay valores inválidos, el servidor no arranca y muestra todos los errores juntos.
+
+---
+
+## Notificaciones por Telegram
+
+1. En Telegram, habla con [@BotFather](https://t.me/BotFather), envía `/newbot` y sigue los pasos. Al final te da el **token** (algo como `123456789:AA…`).
+2. Abre el chat con tu bot nuevo y envíale cualquier mensaje (un bot no puede escribirte si tú no le escribiste antes).
+3. Abre `https://api.telegram.org/bot<TOKEN>/getUpdates` en el navegador. En la respuesta, `"chat":{"id":…}` es tu **chat ID**.
+4. Arranca el servidor con las dos variables:
+
+```powershell
+$env:TELEGRAM_BOT_TOKEN = "123456789:AA..."
+$env:TELEGRAM_CHAT_ID = "987654321"
+go run ./cmd/server
+```
+
+Cada alerta llega como un mensaje con la regla, la IP, el número de eventos y la hora. El envío funciona así:
+
+- **No bloquea:** los workers dejan la alerta en una cola de 100 y siguen procesando eventos. Si la cola se llena, la alerta se descarta (queda en el log y en el panel).
+- **Reintentos:** hasta 4 intentos con espera creciente (1 s, 2 s, 4 s) y 10 s de timeout por intento, para caídas de red, errores 5xx o `429` (límite de mensajes).
+- **Errores permanentes:** un token o chat incorrecto (`401`, `400`) no se reintenta.
+- **El token no aparece en los logs:** los errores de red de Go incluyen la URL, y la URL lleva el token, así que se descarta antes de registrar el error.
 
 ---
 
@@ -212,10 +274,12 @@ internal/
   api/                 handlers HTTP y validación de parámetros
   config/              lectura de variables de entorno
   db/                  pool de conexiones y migraciones (goose)
-  detector/            reglas de detección (fuerza bruta)
+  detector/            reglas de detección y ventana deslizante
   event/               modelo de evento y validación
+  notify/              notificador con reintentos y cliente de Telegram
   pipeline/            cola con buffer y workers concurrentes
   store/               almacenamiento: PostgreSQL y memoria
+  web/                 panel web (HTML embebido en el binario)
 docker/postgres/       script de inicialización de la base
 ```
 
@@ -229,6 +293,9 @@ docker/postgres/       script de inicialización de la base
 - **Timeouts en cada escritura.** Si la base se cuelga, ningún worker queda bloqueado más de 5 segundos.
 - **Migraciones dentro del binario.** Desplegar es copiar un solo ejecutable; el esquema se actualiza solo al arrancar.
 - **La ventana usa el tiempo del evento**, no el de llegada. Así la detección funciona igual si los eventos se reenvían con retraso.
+- **Notificar sin frenar.** Telegram puede tardar o caerse; por eso el envío va en su propia goroutine con su propia cola, y el worker solo encola.
+- **Reglas como lista.** El pipeline recibe un `[]Detector`. Agregar una regla es implementar `Check(evento) *Alert` y sumarla a la lista en `main.go`.
+- **Panel sin dependencias ni HTML inyectado.** Es un solo archivo HTML que usa `fetch`. Todo el contenido de los eventos se inserta con `textContent`, nunca como HTML, porque lo escribe quien envía el evento (un atacante incluido). La página también envía una `Content-Security-Policy` que bloquea scripts de otros orígenes.
 
 ---
 
@@ -236,8 +303,10 @@ docker/postgres/       script de inicialización de la base
 
 - Si la base de datos falla después de responder `202`, el evento se pierde (queda registrado en el log). Las soluciones posibles son reintentos en el worker o una cola persistente.
 - `POST /events` no tiene autenticación: cualquiera puede enviar eventos falsos. Está planificado para la fase 6.
-- El estado del detector (ventanas y enfriamientos) vive en memoria. Al reiniciar se pierde, aunque los eventos sigan en la base.
-- El mapa de intentos del detector crece con cada IP nueva y nunca se limpia.
+- El panel y los endpoints de lectura no tienen autenticación: cualquiera que llegue al puerto ve los eventos. No lo expongas a internet hasta la fase 6.
+- El estado de los detectores (ventanas y enfriamientos) vive en memoria. Al reiniciar se pierde, aunque los eventos sigan en la base.
+- Los mapas de los detectores crecen con cada IP nueva y no se limpian del todo.
+- La cola de notificaciones vive en memoria: si el proceso muere de golpe, las alertas pendientes no se envían (sí quedan guardadas en la base).
 - Con varios workers, los eventos pueden procesarse algo desordenados, y la ventana puede ser ligeramente imprecisa.
 
 ---
@@ -251,8 +320,8 @@ docker/postgres/       script de inicialización de la base
 | 2 | Cola con buffer, workers concurrentes, contrapresión, apagado ordenado | ✅ |
 | 3 | Detector de fuerza bruta con ventana deslizante, `GET /alerts` | ✅ |
 | 4 | PostgreSQL, migraciones, pool de conexiones, configuración por entorno | ✅ |
-| 5 | Notificaciones (Telegram/email), dashboard web, estadísticas, más reglas de detección | 🚧 |
-| 6 | Dockerfile, CI con GitHub Actions, API key, rate limiting, `/readyz` y `/metrics` | ⏳ |
+| 5 | Notificaciones por Telegram, panel web, estadísticas, reglas de compromiso y escaneo | ✅ |
+| 6 | Dockerfile, CI con GitHub Actions, API key, rate limiting, `/readyz` y `/metrics` | 🚧 |
 | 7 | Agente que lee `/var/log/auth.log` en tiempo real y despliegue en un VPS con HTTPS | ⏳ |
 | 8 | Benchmark de rendimiento y caso de estudio | ⏳ |
 

@@ -3,17 +3,20 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/williamfloress/mini-siem/internal/detector"
 	"github.com/williamfloress/mini-siem/internal/event"
+	"github.com/williamfloress/mini-siem/internal/web"
 )
 
-type EventLister interface {
+type EventReader interface {
 	List(ctx context.Context, limit int) ([]event.Event, error)
+	TopIPs(ctx context.Context, since time.Time, limit int) ([]event.IPCount, error)
 }
 
 type AlertLister interface {
@@ -25,13 +28,13 @@ type EventSubmitter interface {
 }
 
 type Handler struct {
-	events    EventLister
+	events    EventReader
 	alerts    AlertLister
 	submitter EventSubmitter
 	logger    *slog.Logger
 }
 
-func NewRouter(events EventLister, alerts AlertLister, submitter EventSubmitter, logger *slog.Logger) http.Handler {
+func NewRouter(events EventReader, alerts AlertLister, submitter EventSubmitter, logger *slog.Logger) http.Handler {
 	h := &Handler{events: events, alerts: alerts, submitter: submitter, logger: logger}
 
 	mux := http.NewServeMux()
@@ -39,6 +42,9 @@ func NewRouter(events EventLister, alerts AlertLister, submitter EventSubmitter,
 	mux.HandleFunc("POST /events", h.createEvent)
 	mux.HandleFunc("GET /events", h.listEvents)
 	mux.HandleFunc("GET /alerts", h.listAlerts)
+	mux.HandleFunc("GET /stats/top-ips", h.topIPs)
+	// {$} = solo la raíz exacta; cualquier otra ruta desconocida sigue dando 404.
+	mux.HandleFunc("GET /{$}", web.Dashboard)
 	return mux
 }
 
@@ -72,15 +78,53 @@ func (h *Handler) createEvent(w http.ResponseWriter, r *http.Request) {
 }
 
 func parseLimit(r *http.Request) (int, error) {
+	return parseLimitRange(r, 50, 500)
+}
+
+func parseLimitRange(r *http.Request, def, max int) (int, error) {
 	v := r.URL.Query().Get("limit")
 	if v == "" {
-		return 50, nil
+		return def, nil
 	}
 	n, err := strconv.Atoi(v)
-	if err != nil || n < 1 || n > 500 {
-		return 0, errors.New("limit debe estar entre 1 y 500")
+	if err != nil || n < 1 || n > max {
+		return 0, fmt.Errorf("limit debe estar entre 1 y %d", max)
 	}
 	return n, nil
+}
+
+const maxStatsWindow = 30 * 24 * time.Hour
+
+type topIPsResponse struct {
+	Window string          `json:"window"`
+	Since  time.Time       `json:"since"`
+	IPs    []event.IPCount `json:"ips"`
+}
+
+// topIPs devuelve las IPs con más eventos en el periodo window (por defecto 24h).
+func (h *Handler) topIPs(w http.ResponseWriter, r *http.Request) {
+	limit, err := parseLimitRange(r, 10, 100)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	window := 24 * time.Hour
+	if v := r.URL.Query().Get("window"); v != "" {
+		window, err = time.ParseDuration(v)
+		if err != nil || window <= 0 || window > maxStatsWindow {
+			writeError(w, http.StatusBadRequest, "window debe ser una duración entre 1s y 720h (por ejemplo 1h o 24h)")
+			return
+		}
+	}
+
+	since := time.Now().UTC().Add(-window)
+	ips, err := h.events.TopIPs(r.Context(), since, limit)
+	if err != nil {
+		h.internalError(w, "top IPs", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, topIPsResponse{Window: window.String(), Since: since, IPs: ips})
 }
 
 func (h *Handler) listEvents(w http.ResponseWriter, r *http.Request) {

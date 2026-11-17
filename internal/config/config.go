@@ -16,6 +16,21 @@ type Config struct {
 	BruteForceThreshold int
 	BruteForceWindow    time.Duration
 	BruteForceCooldown  time.Duration
+
+	CompromiseThreshold int
+	CompromiseWindow    time.Duration
+
+	ScanThreshold int
+	ScanWindow    time.Duration
+	ScanCooldown  time.Duration
+
+	// Vacíos = sin notificaciones externas (las alertas igual se guardan y se ven en el panel).
+	TelegramToken  string
+	TelegramChatID string
+}
+
+func (c Config) TelegramEnabled() bool {
+	return c.TelegramToken != ""
 }
 
 // Load lee la configuración de getenv (os.Getenv en producción, un mapa en los tests).
@@ -29,19 +44,24 @@ func Load(getenv func(string) string) (Config, error) {
 		BruteForceThreshold: intVar(getenv, "BRUTEFORCE_THRESHOLD", 5, &errs),
 		BruteForceWindow:    durationVar(getenv, "BRUTEFORCE_WINDOW", time.Minute, &errs),
 		BruteForceCooldown:  durationVar(getenv, "BRUTEFORCE_COOLDOWN", 5*time.Minute, &errs),
+		CompromiseThreshold: intVar(getenv, "COMPROMISE_THRESHOLD", 5, &errs),
+		CompromiseWindow:    durationVar(getenv, "COMPROMISE_WINDOW", 10*time.Minute, &errs),
+		ScanThreshold:       intVar(getenv, "SCAN_THRESHOLD", 20, &errs),
+		ScanWindow:          durationVar(getenv, "SCAN_WINDOW", time.Minute, &errs),
+		ScanCooldown:        durationVar(getenv, "SCAN_COOLDOWN", 10*time.Minute, &errs),
+		TelegramToken:       getenv("TELEGRAM_BOT_TOKEN"),
+		TelegramChatID:      getenv("TELEGRAM_CHAT_ID"),
 	}
 
 	if cfg.Port < 1 || cfg.Port > 65535 {
 		errs = append(errs, fmt.Errorf("PORT debe estar entre 1 y 65535 (es %d)", cfg.Port))
 	}
-	if cfg.BruteForceThreshold < 1 {
-		errs = append(errs, fmt.Errorf("BRUTEFORCE_THRESHOLD debe ser al menos 1 (es %d)", cfg.BruteForceThreshold))
-	}
-	if cfg.BruteForceWindow <= 0 {
-		errs = append(errs, fmt.Errorf("BRUTEFORCE_WINDOW debe ser positiva (es %s)", cfg.BruteForceWindow))
-	}
-	if cfg.BruteForceCooldown < 0 {
-		errs = append(errs, fmt.Errorf("BRUTEFORCE_COOLDOWN no puede ser negativo (es %s)", cfg.BruteForceCooldown))
+	checkRule(&errs, "BRUTEFORCE", cfg.BruteForceThreshold, cfg.BruteForceWindow, cfg.BruteForceCooldown)
+	checkRule(&errs, "COMPROMISE", cfg.CompromiseThreshold, cfg.CompromiseWindow, 0)
+	checkRule(&errs, "SCAN", cfg.ScanThreshold, cfg.ScanWindow, cfg.ScanCooldown)
+
+	if (cfg.TelegramToken == "") != (cfg.TelegramChatID == "") {
+		errs = append(errs, errors.New("TELEGRAM_BOT_TOKEN y TELEGRAM_CHAT_ID van juntos: define las dos o ninguna"))
 	}
 
 	return cfg, errors.Join(errs...)
@@ -50,6 +70,18 @@ func Load(getenv func(string) string) (Config, error) {
 // FromEnv es el atajo para producción.
 func FromEnv() (Config, error) {
 	return Load(os.Getenv)
+}
+
+func checkRule(errs *[]error, prefix string, threshold int, window, cooldown time.Duration) {
+	if threshold < 1 {
+		*errs = append(*errs, fmt.Errorf("%s_THRESHOLD debe ser al menos 1 (es %d)", prefix, threshold))
+	}
+	if window <= 0 {
+		*errs = append(*errs, fmt.Errorf("%s_WINDOW debe ser positiva (es %s)", prefix, window))
+	}
+	if cooldown < 0 {
+		*errs = append(*errs, fmt.Errorf("%s_COOLDOWN no puede ser negativo (es %s)", prefix, cooldown))
+	}
 }
 
 func (c Config) Addr() string {

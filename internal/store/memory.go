@@ -1,7 +1,9 @@
 package store
 
 import (
+	"cmp"
 	"context"
+	"slices"
 	"sync"
 	"time"
 
@@ -37,6 +39,43 @@ func (s *MemoryEventStore) List(_ context.Context, limit int) ([]event.Event, er
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return lastN(s.events, limit), nil
+}
+
+// TopIPs agrupa por IP los eventos ocurridos desde since, de la más activa a la menos.
+func (s *MemoryEventStore) TopIPs(_ context.Context, since time.Time, limit int) ([]event.IPCount, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	byIP := map[string]*event.IPCount{}
+	for _, e := range s.events {
+		if e.Timestamp.Before(since) {
+			continue
+		}
+		c := byIP[e.IP]
+		if c == nil {
+			c = &event.IPCount{IP: e.IP}
+			byIP[e.IP] = c
+		}
+		c.Events++
+		if e.Type == "login_failed" {
+			c.FailedLogins++
+		}
+		if e.Timestamp.After(c.LastSeen) {
+			c.LastSeen = e.Timestamp
+		}
+	}
+
+	out := make([]event.IPCount, 0, len(byIP))
+	for _, c := range byIP {
+		out = append(out, *c)
+	}
+	slices.SortFunc(out, func(a, b event.IPCount) int {
+		return cmp.Or(cmp.Compare(b.Events, a.Events), b.LastSeen.Compare(a.LastSeen), cmp.Compare(a.IP, b.IP))
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 type MemoryAlertStore struct {

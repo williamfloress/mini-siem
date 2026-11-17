@@ -112,3 +112,40 @@ func TestPostgresAlertStore(t *testing.T) {
 		t.Fatalf("List = %+v, se esperaba [%+v]", got, saved)
 	}
 }
+
+func TestPostgresTopIPs(t *testing.T) {
+	ctx := context.Background()
+	s := NewPostgresEventStore(testPool(t))
+
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	add := func(ip, typ string, at time.Time) {
+		t.Helper()
+		if _, err := s.Add(ctx, event.Event{Timestamp: at, Source: "ssh", Type: typ, IP: ip}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("10.0.0.1", "login_failed", base.Add(-48*time.Hour)) // fuera del periodo
+	for i := range 3 {
+		add("10.0.0.1", "login_failed", base.Add(time.Duration(i)*time.Minute))
+	}
+	add("10.0.0.2", "login_success", base)
+	add("10.0.0.3", "login_failed", base)
+	add("10.0.0.3", "login_success", base.Add(time.Minute))
+
+	got, err := s.TopIPs(ctx, base.Add(-time.Hour), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []event.IPCount{
+		{IP: "10.0.0.1", Events: 3, FailedLogins: 3, LastSeen: base.Add(2 * time.Minute)},
+		{IP: "10.0.0.3", Events: 2, FailedLogins: 1, LastSeen: base.Add(time.Minute)},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("TopIPs = %+v, quería %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("TopIPs[%d] = %+v, quería %+v", i, got[i], want[i])
+		}
+	}
+}

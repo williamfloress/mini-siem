@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -65,6 +66,36 @@ func (s *PostgresEventStore) List(ctx context.Context, limit int) ([]event.Event
 		return nil, fmt.Errorf("leer eventos: %w", err)
 	}
 	return events, nil
+}
+
+// TopIPs agrupa por IP los eventos ocurridos desde since. El filtro por occurred_at
+// usa el índice events_occurred_at_idx; el GROUP BY y el orden se hacen sobre ese rango.
+func (s *PostgresEventStore) TopIPs(ctx context.Context, since time.Time, limit int) ([]event.IPCount, error) {
+	const q = `
+		SELECT host(ip),
+		       count(*),
+		       count(*) FILTER (WHERE type = 'login_failed'),
+		       max(occurred_at)
+		FROM events
+		WHERE occurred_at >= $1
+		GROUP BY ip
+		ORDER BY count(*) DESC, max(occurred_at) DESC, ip
+		LIMIT $2`
+
+	rows, err := s.pool.Query(ctx, q, since, limit)
+	if err != nil {
+		return nil, fmt.Errorf("top IPs: %w", err)
+	}
+	counts, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (event.IPCount, error) {
+		var c event.IPCount
+		err := row.Scan(&c.IP, &c.Events, &c.FailedLogins, &c.LastSeen)
+		c.LastSeen = c.LastSeen.UTC()
+		return c, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("leer top IPs: %w", err)
+	}
+	return counts, nil
 }
 
 // PostgresAlertStore persiste alertas en la tabla alerts.

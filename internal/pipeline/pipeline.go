@@ -29,22 +29,30 @@ type AlertSink interface {
 	Add(ctx context.Context, a detector.Alert) (detector.Alert, error)
 }
 
-type Pipeline struct {
-	queue    chan event.Event
-	store    Store
-	detector Detector
-	alerts   AlertSink
-	logger   *slog.Logger
-	wg       sync.WaitGroup
+// Notifier recibe las alertas ya guardadas. Enqueue no debe bloquear: el worker
+// no puede quedarse esperando a un servicio externo.
+type Notifier interface {
+	Enqueue(a detector.Alert)
 }
 
-func New(store Store, det Detector, alerts AlertSink, logger *slog.Logger, queueSize int) *Pipeline {
+type Pipeline struct {
+	queue     chan event.Event
+	store     Store
+	detectors []Detector
+	alerts    AlertSink
+	notifier  Notifier // puede ser nil: sin notificaciones externas
+	logger    *slog.Logger
+	wg        sync.WaitGroup
+}
+
+func New(store Store, detectors []Detector, alerts AlertSink, notifier Notifier, logger *slog.Logger, queueSize int) *Pipeline {
 	return &Pipeline{
-		queue:    make(chan event.Event, queueSize),
-		store:    store,
-		detector: det,
-		alerts:   alerts,
-		logger:   logger,
+		queue:     make(chan event.Event, queueSize),
+		store:     store,
+		detectors: detectors,
+		alerts:    alerts,
+		notifier:  notifier,
+		logger:    logger,
 	}
 }
 
@@ -62,7 +70,7 @@ func (p *Pipeline) worker(id int) {
 	}
 }
 
-// process guarda el evento y lo pasa por el detector. Usa context.Background (con
+// process guarda el evento y lo pasa por cada detector. Usa context.Background (con
 // timeout) y no el contexto de la petición HTTP: cuando el worker toma el evento,
 // la petición ya respondió 202 y su contexto está cancelado.
 func (p *Pipeline) process(worker int, e event.Event) {
@@ -78,13 +86,20 @@ func (p *Pipeline) process(worker int, e event.Event) {
 	p.logger.Info("evento procesado",
 		"worker", worker, "id", saved.ID, "type", saved.Type, "ip", saved.IP)
 
-	a := p.detector.Check(saved)
-	if a == nil {
-		return
+	// Un mismo evento puede disparar varias reglas: el login exitoso que cierra una
+	// racha de fallos alerta como possible_compromise aunque brute_force ya haya alertado.
+	for _, det := range p.detectors {
+		if a := det.Check(saved); a != nil {
+			p.raise(worker, *a)
+		}
 	}
+}
 
-	ctx, cancel = context.WithTimeout(context.Background(), opTimeout)
-	savedAlert, err := p.alerts.Add(ctx, *a)
+// raise guarda la alerta y la pasa al notificador. Solo se notifican las alertas
+// guardadas, así el ID del mensaje existe en GET /alerts.
+func (p *Pipeline) raise(worker int, a detector.Alert) {
+	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
+	saved, err := p.alerts.Add(ctx, a)
 	cancel()
 	if err != nil {
 		p.logger.Error("no se pudo guardar la alerta",
@@ -92,7 +107,11 @@ func (p *Pipeline) process(worker int, e event.Event) {
 		return
 	}
 	p.logger.Warn("ALERTA",
-		"id", savedAlert.ID, "rule", a.Rule, "ip", a.IP, "count", a.Count, "worker", worker)
+		"id", saved.ID, "rule", saved.Rule, "ip", saved.IP, "count", saved.Count, "worker", worker)
+
+	if p.notifier != nil {
+		p.notifier.Enqueue(saved)
+	}
 }
 
 func (p *Pipeline) Submit(e event.Event) error {

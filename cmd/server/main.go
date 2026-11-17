@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/williamfloress/mini-siem/internal/config"
 	"github.com/williamfloress/mini-siem/internal/db"
 	"github.com/williamfloress/mini-siem/internal/detector"
+	"github.com/williamfloress/mini-siem/internal/notify"
 	"github.com/williamfloress/mini-siem/internal/pipeline"
 	"github.com/williamfloress/mini-siem/internal/store"
 )
@@ -21,7 +23,7 @@ import (
 // Interfaces que cumplen tanto los stores en memoria como los de Postgres.
 type eventStore interface {
 	pipeline.Store
-	api.EventLister
+	api.EventReader
 }
 
 type alertStore interface {
@@ -70,16 +72,38 @@ func run(logger *slog.Logger) error {
 		alerts = store.NewPostgresAlertStore(pool)
 	}
 
-	det := detector.NewBruteForce(cfg.BruteForceThreshold, cfg.BruteForceWindow, cfg.BruteForceCooldown)
-	logger.Info("detector configurado", "threshold", cfg.BruteForceThreshold,
-		"window", cfg.BruteForceWindow.String(), "cooldown", cfg.BruteForceCooldown.String())
+	detectors := []pipeline.Detector{
+		detector.NewBruteForce(cfg.BruteForceThreshold, cfg.BruteForceWindow, cfg.BruteForceCooldown),
+		detector.NewCompromise(cfg.CompromiseThreshold, cfg.CompromiseWindow),
+		detector.NewNotFoundScan(cfg.ScanThreshold, cfg.ScanWindow, cfg.ScanCooldown),
+	}
+	logger.Info("reglas configuradas",
+		"brute_force", fmt.Sprintf("%d en %s, enfriamiento %s", cfg.BruteForceThreshold, cfg.BruteForceWindow, cfg.BruteForceCooldown),
+		"possible_compromise", fmt.Sprintf("éxito tras %d fallos en %s", cfg.CompromiseThreshold, cfg.CompromiseWindow),
+		"http_404_scan", fmt.Sprintf("%d en %s, enfriamiento %s", cfg.ScanThreshold, cfg.ScanWindow, cfg.ScanCooldown))
 
-	pipe := pipeline.New(events, det, alerts, logger, 1000)
+	// Se declara como interfaz y solo se asigna si hay Telegram: un *Dispatcher nil
+	// guardado en la interfaz no sería == nil y el pipeline lo llamaría igual.
+	var notifier pipeline.Notifier
+	if cfg.TelegramEnabled() {
+		dispatcher := notify.NewDispatcher(notify.NewTelegram(cfg.TelegramToken, cfg.TelegramChatID), logger, 100)
+		dispatcher.Start()
+		// Los defer corren en orden inverso: este se ejecuta después de pipe.Stop(),
+		// cuando ya no se pueden generar alertas nuevas.
+		defer dispatcher.Stop(10 * time.Second)
+		notifier = dispatcher
+		logger.Info("notificaciones por Telegram activadas")
+	} else {
+		logger.Info("sin TELEGRAM_BOT_TOKEN: las alertas no se notifican fuera del panel")
+	}
+
+	pipe := pipeline.New(events, detectors, alerts, notifier, logger, 1000)
 	pipe.Start(4)
 	defer pipe.Stop()
 
 	router := api.NewRouter(events, alerts, pipe, logger)
 	srv := &http.Server{Addr: cfg.Addr(), Handler: router}
+	logger.Info("panel disponible", "url", fmt.Sprintf("http://localhost:%d/", cfg.Port))
 
 	serverErr := make(chan error, 1)
 	go func() {
@@ -101,6 +125,7 @@ func run(logger *slog.Logger) error {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("error al apagar el servidor", "error", err)
 	}
-	// Los defer corren en orden inverso: pipe.Stop() (vacía la cola) y luego pool.Close().
+	// Los defer corren en orden inverso: pipe.Stop() (vacía la cola), dispatcher.Stop()
+	// (envía las alertas pendientes) y por último pool.Close().
 	return nil
 }

@@ -112,7 +112,16 @@ func run(logger *slog.Logger) error {
 	defer pipe.Stop()
 
 	router := api.NewRouter(events, alerts, pipe, logger)
-	srv := &http.Server{Addr: cfg.Addr(), Handler: router}
+	srv := &http.Server{
+		Addr:    cfg.Addr(),
+		Handler: router,
+		// Sin timeouts, un cliente que envía los bytes muy despacio (Slowloris) retiene
+		// una conexión y una goroutine para siempre.
+		ReadHeaderTimeout: 5 * time.Second,  // cabeceras
+		ReadTimeout:       10 * time.Second, // cabeceras + cuerpo (máximo 1 MB)
+		WriteTimeout:      15 * time.Second, // desde que se leyó la petición hasta terminar la respuesta
+		IdleTimeout:       60 * time.Second, // conexiones keep-alive inactivas
+	}
 	logger.Info("panel disponible", "url", fmt.Sprintf("http://localhost:%d/", cfg.Port))
 
 	serverErr := make(chan error, 1)

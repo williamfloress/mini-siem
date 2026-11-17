@@ -111,7 +111,16 @@ func run(logger *slog.Logger) error {
 	pipe.Start(4)
 	defer pipe.Stop()
 
-	router := api.NewRouter(events, alerts, pipe, logger)
+	if cfg.IngestAPIKey == "" {
+		logger.Warn("INGEST_API_KEY vacía: cualquiera puede enviar eventos a POST /events")
+	}
+	router := api.NewRouter(api.Deps{
+		Events:    events,
+		Alerts:    alerts,
+		Submitter: pipe,
+		Logger:    logger,
+		APIKey:    cfg.IngestAPIKey,
+	})
 	srv := &http.Server{
 		Addr:    cfg.Addr(),
 		Handler: router,

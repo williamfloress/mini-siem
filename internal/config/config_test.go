@@ -81,3 +81,14 @@ func TestLoadTelegramNeedsBothVars(t *testing.T) {
 		t.Errorf("con las dos variables debería activarse: cfg=%+v err=%v", cfg, err)
 	}
 }
+
+func TestLoadIngestAPIKey(t *testing.T) {
+	if _, err := Load(env(map[string]string{"INGEST_API_KEY": "corta"})); err == nil {
+		t.Error("una clave corta debería ser error")
+	}
+	key := strings.Repeat("k", 32)
+	cfg, err := Load(env(map[string]string{"INGEST_API_KEY": key}))
+	if err != nil || cfg.IngestAPIKey != key {
+		t.Errorf("clave válida rechazada: cfg=%+v err=%v", cfg, err)
+	}
+}

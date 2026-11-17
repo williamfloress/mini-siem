@@ -27,7 +27,13 @@ type Config struct {
 	// Vacíos = sin notificaciones externas (las alertas igual se guardan y se ven en el panel).
 	TelegramToken  string
 	TelegramChatID string
+
+	// Clave que deben enviar los clientes de POST /events. Vacía = ingesta abierta (solo para desarrollo).
+	IngestAPIKey string
 }
+
+// minAPIKeyLen evita claves triviales: con 32 caracteres aleatorios no se puede adivinar.
+const minAPIKeyLen = 32
 
 func (c Config) TelegramEnabled() bool {
 	return c.TelegramToken != ""
@@ -51,6 +57,7 @@ func Load(getenv func(string) string) (Config, error) {
 		ScanCooldown:        durationVar(getenv, "SCAN_COOLDOWN", 10*time.Minute, &errs),
 		TelegramToken:       getenv("TELEGRAM_BOT_TOKEN"),
 		TelegramChatID:      getenv("TELEGRAM_CHAT_ID"),
+		IngestAPIKey:        getenv("INGEST_API_KEY"),
 	}
 
 	if cfg.Port < 1 || cfg.Port > 65535 {
@@ -62,6 +69,10 @@ func Load(getenv func(string) string) (Config, error) {
 
 	if (cfg.TelegramToken == "") != (cfg.TelegramChatID == "") {
 		errs = append(errs, errors.New("TELEGRAM_BOT_TOKEN y TELEGRAM_CHAT_ID van juntos: define las dos o ninguna"))
+	}
+
+	if cfg.IngestAPIKey != "" && len(cfg.IngestAPIKey) < minAPIKeyLen {
+		errs = append(errs, fmt.Errorf("INGEST_API_KEY debe tener al menos %d caracteres (tiene %d)", minAPIKeyLen, len(cfg.IngestAPIKey)))
 	}
 
 	return cfg, errors.Join(errs...)

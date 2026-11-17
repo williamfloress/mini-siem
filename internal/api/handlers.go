@@ -27,6 +27,17 @@ type EventSubmitter interface {
 	Submit(e event.Event) error
 }
 
+// Deps son las dependencias del router. Logger, Events, Alerts y Submitter son obligatorias.
+type Deps struct {
+	Events    EventReader
+	Alerts    AlertLister
+	Submitter EventSubmitter
+	Logger    *slog.Logger
+
+	// APIKey protege POST /events. Vacía = ingesta abierta (modo desarrollo).
+	APIKey string
+}
+
 type Handler struct {
 	events    EventReader
 	alerts    AlertLister
@@ -34,12 +45,17 @@ type Handler struct {
 	logger    *slog.Logger
 }
 
-func NewRouter(events EventReader, alerts AlertLister, submitter EventSubmitter, logger *slog.Logger) http.Handler {
-	h := &Handler{events: events, alerts: alerts, submitter: submitter, logger: logger}
+func NewRouter(d Deps) http.Handler {
+	h := &Handler{events: d.Events, alerts: d.Alerts, submitter: d.Submitter, logger: d.Logger}
+
+	var ingest http.Handler = http.HandlerFunc(h.createEvent)
+	if d.APIKey != "" {
+		ingest = requireAPIKey(d.APIKey, ingest)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.health)
-	mux.HandleFunc("POST /events", h.createEvent)
+	mux.Handle("POST /events", ingest)
 	mux.HandleFunc("GET /events", h.listEvents)
 	mux.HandleFunc("GET /alerts", h.listAlerts)
 	mux.HandleFunc("GET /stats/top-ips", h.topIPs)

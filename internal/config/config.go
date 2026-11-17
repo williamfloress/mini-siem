@@ -30,6 +30,17 @@ type Config struct {
 
 	// Clave que deben enviar los clientes de POST /events. Vacía = ingesta abierta (solo para desarrollo).
 	IngestAPIKey string
+
+	// Rate limit por IP: RateLimitRPS peticiones por segundo con ráfagas de RateLimitBurst.
+	// RateLimitRPS = 0 lo desactiva.
+	RateLimitRPS   float64
+	RateLimitBurst int
+	// TrustProxy toma la IP del cliente de X-Forwarded-For. Solo detrás de un proxy propio.
+	TrustProxy bool
+}
+
+func (c Config) RateLimitEnabled() bool {
+	return c.RateLimitRPS > 0
 }
 
 // minAPIKeyLen evita claves triviales: con 32 caracteres aleatorios no se puede adivinar.
@@ -58,6 +69,9 @@ func Load(getenv func(string) string) (Config, error) {
 		TelegramToken:       getenv("TELEGRAM_BOT_TOKEN"),
 		TelegramChatID:      getenv("TELEGRAM_CHAT_ID"),
 		IngestAPIKey:        getenv("INGEST_API_KEY"),
+		RateLimitRPS:        floatVar(getenv, "RATE_LIMIT_RPS", 20, &errs),
+		RateLimitBurst:      intVar(getenv, "RATE_LIMIT_BURST", 50, &errs),
+		TrustProxy:          boolVar(getenv, "TRUST_PROXY", false, &errs),
 	}
 
 	if cfg.Port < 1 || cfg.Port > 65535 {
@@ -73,6 +87,13 @@ func Load(getenv func(string) string) (Config, error) {
 
 	if cfg.IngestAPIKey != "" && len(cfg.IngestAPIKey) < minAPIKeyLen {
 		errs = append(errs, fmt.Errorf("INGEST_API_KEY debe tener al menos %d caracteres (tiene %d)", minAPIKeyLen, len(cfg.IngestAPIKey)))
+	}
+
+	if cfg.RateLimitRPS < 0 {
+		errs = append(errs, fmt.Errorf("RATE_LIMIT_RPS no puede ser negativo (es %g)", cfg.RateLimitRPS))
+	}
+	if cfg.RateLimitEnabled() && cfg.RateLimitBurst < 1 {
+		errs = append(errs, fmt.Errorf("RATE_LIMIT_BURST debe ser al menos 1 (es %d)", cfg.RateLimitBurst))
 	}
 
 	return cfg, errors.Join(errs...)
@@ -123,4 +144,30 @@ func durationVar(getenv func(string) string, key string, def time.Duration, errs
 		return def
 	}
 	return d
+}
+
+func floatVar(getenv func(string) string, key string, def float64, errs *[]error) float64 {
+	v := getenv(key)
+	if v == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		*errs = append(*errs, fmt.Errorf("%s debe ser un número (es %q)", key, v))
+		return def
+	}
+	return f
+}
+
+func boolVar(getenv func(string) string, key string, def bool, errs *[]error) bool {
+	v := getenv(key)
+	if v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		*errs = append(*errs, fmt.Errorf("%s debe ser true o false (es %q)", key, v))
+		return def
+	}
+	return b
 }

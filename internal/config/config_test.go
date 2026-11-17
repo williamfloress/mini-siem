@@ -92,3 +92,20 @@ func TestLoadIngestAPIKey(t *testing.T) {
 		t.Errorf("clave válida rechazada: cfg=%+v err=%v", cfg, err)
 	}
 }
+
+func TestLoadRateLimit(t *testing.T) {
+	cfg, err := Load(env(nil))
+	if err != nil || !cfg.RateLimitEnabled() || cfg.RateLimitRPS != 20 || cfg.RateLimitBurst != 50 || cfg.TrustProxy {
+		t.Fatalf("valores por defecto incorrectos: cfg=%+v err=%v", cfg, err)
+	}
+	cfg, err = Load(env(map[string]string{"RATE_LIMIT_RPS": "0", "TRUST_PROXY": "true"}))
+	if err != nil || cfg.RateLimitEnabled() || !cfg.TrustProxy {
+		t.Fatalf("RATE_LIMIT_RPS=0 debería desactivarlo: cfg=%+v err=%v", cfg, err)
+	}
+	_, err = Load(env(map[string]string{"RATE_LIMIT_RPS": "-1", "RATE_LIMIT_BURST": "x", "TRUST_PROXY": "quizás"}))
+	for _, key := range []string{"RATE_LIMIT_RPS", "RATE_LIMIT_BURST", "TRUST_PROXY"} {
+		if err == nil || !strings.Contains(err.Error(), key) {
+			t.Errorf("el error no menciona %s: %v", key, err)
+		}
+	}
+}

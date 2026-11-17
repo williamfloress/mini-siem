@@ -114,12 +114,18 @@ func run(logger *slog.Logger) error {
 	if cfg.IngestAPIKey == "" {
 		logger.Warn("INGEST_API_KEY vacía: cualquiera puede enviar eventos a POST /events")
 	}
+	var limiter *api.RateLimiter
+	if cfg.RateLimitEnabled() {
+		limiter = api.NewRateLimiter(cfg.RateLimitRPS, cfg.RateLimitBurst, cfg.TrustProxy)
+		logger.Info("rate limit activado", "rps", cfg.RateLimitRPS, "burst", cfg.RateLimitBurst, "trust_proxy", cfg.TrustProxy)
+	}
 	router := api.NewRouter(api.Deps{
-		Events:    events,
-		Alerts:    alerts,
-		Submitter: pipe,
-		Logger:    logger,
-		APIKey:    cfg.IngestAPIKey,
+		Events:      events,
+		Alerts:      alerts,
+		Submitter:   pipe,
+		Logger:      logger,
+		APIKey:      cfg.IngestAPIKey,
+		RateLimiter: limiter,
 	})
 	srv := &http.Server{
 		Addr:    cfg.Addr(),

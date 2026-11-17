@@ -36,6 +36,8 @@ type Deps struct {
 
 	// APIKey protege POST /events. Vacía = ingesta abierta (modo desarrollo).
 	APIKey string
+	// RateLimiter limita las peticiones por IP. nil = sin límite.
+	RateLimiter *RateLimiter
 }
 
 type Handler struct {
@@ -54,14 +56,24 @@ func NewRouter(d Deps) http.Handler {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", h.health)
 	mux.Handle("POST /events", ingest)
 	mux.HandleFunc("GET /events", h.listEvents)
 	mux.HandleFunc("GET /alerts", h.listAlerts)
 	mux.HandleFunc("GET /stats/top-ips", h.topIPs)
 	// {$} = solo la raíz exacta; cualquier otra ruta desconocida sigue dando 404.
 	mux.HandleFunc("GET /{$}", web.Dashboard)
-	return mux
+
+	var limited http.Handler = mux
+	if d.RateLimiter != nil {
+		limited = d.RateLimiter.Middleware(mux)
+	}
+
+	// Las sondas de salud quedan fuera del rate limit: Docker o un balanceador las
+	// consultan seguido desde la misma IP, y un 429 haría parecer caído al servicio.
+	root := http.NewServeMux()
+	root.HandleFunc("GET /healthz", h.health)
+	root.Handle("/", limited)
+	return root
 }
 
 func (h *Handler) health(w http.ResponseWriter, r *http.Request) {

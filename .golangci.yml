@@ -1,0 +1,32 @@
+version: "2"
+
+linters:
+  # standard = errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  enable:
+    - bodyclose   # respuestas HTTP sin cerrar (fuga de conexiones)
+    - errorlint   # comparar errores con == en vez de errors.Is/As
+    - gosec       # problemas de seguridad comunes
+    - noctx       # peticiones HTTP sin context
+    - unconvert   # conversiones de tipo innecesarias
+  settings:
+    gosec:
+      excludes:
+        - G104 # errores sin revisar: ya lo cubre errcheck, con sus excepciones
+    errcheck:
+      exclude-functions:
+        # Escribir la respuesta solo falla si el cliente ya se desconectó: no hay a quién avisar.
+        - (net/http.ResponseWriter).Write
+        - (*encoding/json.Encoder).Encode
+  exclusions:
+    presets:
+      - std-error-handling
+    rules:
+      # En los tests se ignoran errores a propósito y los valores fijos no son credenciales.
+      - path: _test\.go
+        linters: [errcheck, gosec, noctx]
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

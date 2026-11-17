@@ -66,7 +66,8 @@ func (t *Telegram) Notify(ctx context.Context, a detector.Alert) error {
 	var apiErr struct {
 		Description string `json:"description"`
 	}
-	json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&apiErr)
+	// Si el cuerpo no es JSON, Description queda vacía y el código HTTP basta para el error.
+	_ = json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&apiErr)
 	err = fmt.Errorf("telegram respondió %d: %s", resp.StatusCode, apiErr.Description)
 
 	// 429 (límite de mensajes) y 5xx son pasajeros; cualquier otro 4xx (token o chat

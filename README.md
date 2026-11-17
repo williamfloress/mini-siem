@@ -68,21 +68,18 @@ cd mini-siem
 # 1. Levantar PostgreSQL (puerto 5433 del host)
 docker compose up -d
 
-# 2. Arrancar el servidor (las migraciones se aplican solas)
-export DATABASE_URL="postgres://siem:siem@localhost:5433/siem?sslmode=disable"
+# 2. Crear tu configuración local (ya trae la DATABASE_URL del docker compose)
+cp .env.example .env
+
+# 3. Arrancar el servidor (las migraciones se aplican solas)
 go run ./cmd/server
 ```
 
 El panel queda en **http://localhost:8080/** y se actualiza cada 5 segundos.
 
-En PowerShell, la variable se define así:
+En PowerShell, el paso 2 es `Copy-Item .env.example .env`.
 
-```powershell
-$env:DATABASE_URL = "postgres://siem:siem@localhost:5433/siem?sslmode=disable"
-go run ./cmd/server
-```
-
-Sin `DATABASE_URL`, el servidor arranca en **modo memoria**: funciona igual, pero los datos se pierden al reiniciar. Es útil para probar algo rápido sin Docker.
+Sin `DATABASE_URL` (vacía en `.env` o sin `.env`), el servidor arranca en **modo memoria**: funciona igual, pero los datos se pierden al reiniciar. Es útil para probar algo rápido sin Docker.
 
 ### Simular un ataque
 
@@ -188,7 +185,7 @@ En los endpoints `GET`, un `limit` fuera de rango devuelve `400`. Un fallo de la
 
 ## Configuración
 
-Toda la configuración se lee de variables de entorno ([12-factor](https://12factor.net/config)). Hay un ejemplo en [`.env.example`](.env.example).
+Toda la configuración se lee de variables de entorno ([12-factor](https://12factor.net/config)). Al arrancar, el servidor lee `.env` si existe (con [godotenv](https://github.com/joho/godotenv)); copia [`.env.example`](.env.example) a `.env` y ajústalo. Las variables definidas en el entorno tienen prioridad sobre `.env`, así que en Docker o en producción se configura igual que siempre.
 
 | Variable | Por defecto | Descripción |
 |---|---|---|
@@ -214,12 +211,11 @@ Si hay valores inválidos, el servidor no arranca y muestra todos los errores ju
 1. En Telegram, habla con [@BotFather](https://t.me/BotFather), envía `/newbot` y sigue los pasos. Al final te da el **token** (algo como `123456789:AA…`).
 2. Abre el chat con tu bot nuevo y envíale cualquier mensaje (un bot no puede escribirte si tú no le escribiste antes).
 3. Abre `https://api.telegram.org/bot<TOKEN>/getUpdates` en el navegador. En la respuesta, `"chat":{"id":…}` es tu **chat ID**.
-4. Arranca el servidor con las dos variables:
+4. Pon las dos variables en tu `.env` y arranca el servidor con `go run ./cmd/server`:
 
-```powershell
-$env:TELEGRAM_BOT_TOKEN = "123456789:AA..."
-$env:TELEGRAM_CHAT_ID = "987654321"
-go run ./cmd/server
+```dotenv
+TELEGRAM_BOT_TOKEN=123456789:AA...
+TELEGRAM_CHAT_ID=987654321
 ```
 
 Cada alerta llega como un mensaje con la regla, la IP, el número de eventos y la hora. El envío funciona así:

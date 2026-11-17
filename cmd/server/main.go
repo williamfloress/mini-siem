@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/joho/godotenv"
 	"github.com/williamfloress/mini-siem/internal/api"
 	"github.com/williamfloress/mini-siem/internal/config"
 	"github.com/williamfloress/mini-siem/internal/db"
@@ -41,6 +43,14 @@ func main() {
 }
 
 func run(logger *slog.Logger) error {
+	// .env es opcional y solo rellena variables que no estén definidas:
+	// en Docker o en el servidor mandan las variables del entorno.
+	if err := godotenv.Load(); err == nil {
+		logger.Info("variables cargadas desde .env")
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("leer .env: %w", err)
+	}
+
 	cfg, err := config.FromEnv()
 	if err != nil {
 		return err

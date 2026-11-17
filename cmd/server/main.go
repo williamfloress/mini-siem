@@ -17,6 +17,7 @@ import (
 	"github.com/williamfloress/mini-siem/internal/config"
 	"github.com/williamfloress/mini-siem/internal/db"
 	"github.com/williamfloress/mini-siem/internal/detector"
+	"github.com/williamfloress/mini-siem/internal/metrics"
 	"github.com/williamfloress/mini-siem/internal/notify"
 	"github.com/williamfloress/mini-siem/internal/pipeline"
 	"github.com/williamfloress/mini-siem/internal/store"
@@ -61,6 +62,7 @@ func run(logger *slog.Logger) error {
 
 	var events eventStore
 	var alerts alertStore
+	var ready func(context.Context) error // nil en modo memoria: siempre listo
 	if cfg.DatabaseURL == "" {
 		logger.Warn("DATABASE_URL vacía: modo memoria, los datos se pierden al reiniciar")
 		events = store.NewMemoryEventStore()
@@ -78,6 +80,7 @@ func run(logger *slog.Logger) error {
 			return err
 		}
 		logger.Info("conectado a postgres")
+		ready = pool.Ping
 		events = store.NewPostgresEventStore(pool)
 		alerts = store.NewPostgresAlertStore(pool)
 	}
@@ -107,7 +110,10 @@ func run(logger *slog.Logger) error {
 		logger.Info("sin TELEGRAM_BOT_TOKEN: las alertas no se notifican fuera del panel")
 	}
 
+	m := metrics.New()
 	pipe := pipeline.New(events, detectors, alerts, notifier, logger, 1000)
+	pipe.SetObserver(m)
+	m.RegisterQueue(pipe.QueueLen, pipe.QueueCap())
 	pipe.Start(4)
 	defer pipe.Stop()
 
@@ -126,6 +132,8 @@ func run(logger *slog.Logger) error {
 		Logger:      logger,
 		APIKey:      cfg.IngestAPIKey,
 		RateLimiter: limiter,
+		Ready:       ready,
+		Metrics:     m,
 	})
 	srv := &http.Server{
 		Addr:    cfg.Addr(),

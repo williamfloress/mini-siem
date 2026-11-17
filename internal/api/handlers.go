@@ -11,6 +11,7 @@ import (
 
 	"github.com/williamfloress/mini-siem/internal/detector"
 	"github.com/williamfloress/mini-siem/internal/event"
+	"github.com/williamfloress/mini-siem/internal/metrics"
 	"github.com/williamfloress/mini-siem/internal/web"
 )
 
@@ -38,6 +39,10 @@ type Deps struct {
 	APIKey string
 	// RateLimiter limita las peticiones por IP. nil = sin límite.
 	RateLimiter *RateLimiter
+	// Ready comprueba las dependencias (la base de datos) para /readyz. nil = siempre listo.
+	Ready func(ctx context.Context) error
+	// Metrics cuenta eventos y peticiones y sirve /metrics. nil = sin métricas.
+	Metrics *metrics.Metrics
 }
 
 type Handler struct {
@@ -45,10 +50,19 @@ type Handler struct {
 	alerts    AlertLister
 	submitter EventSubmitter
 	logger    *slog.Logger
+	ready     func(ctx context.Context) error
+	metrics   *metrics.Metrics
 }
 
 func NewRouter(d Deps) http.Handler {
-	h := &Handler{events: d.Events, alerts: d.Alerts, submitter: d.Submitter, logger: d.Logger}
+	h := &Handler{
+		events:    d.Events,
+		alerts:    d.Alerts,
+		submitter: d.Submitter,
+		logger:    d.Logger,
+		ready:     d.Ready,
+		metrics:   d.Metrics,
+	}
 
 	var ingest http.Handler = http.HandlerFunc(h.createEvent)
 	if d.APIKey != "" {
@@ -72,12 +86,33 @@ func NewRouter(d Deps) http.Handler {
 	// consultan seguido desde la misma IP, y un 429 haría parecer caído al servicio.
 	root := http.NewServeMux()
 	root.HandleFunc("GET /healthz", h.health)
+	root.HandleFunc("GET /readyz", h.readiness)
+	if d.Metrics != nil {
+		root.Handle("GET /metrics", d.Metrics.Handler())
+	}
 	root.Handle("/", limited)
-	return root
+	return d.Metrics.Middleware(root)
 }
 
+// health (liveness) solo dice que el proceso responde. No mira la base: si lo hiciera,
+// una caída de Postgres haría que Docker o Kubernetes reiniciaran el servidor sin motivo.
 func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// readiness dice si el servidor puede hacer su trabajo: con la base caída, los eventos
+// se aceptan (202) pero no se pueden guardar.
+func (h *Handler) readiness(w http.ResponseWriter, r *http.Request) {
+	if h.ready != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := h.ready(ctx); err != nil {
+			h.logger.Warn("readyz: no listo", "error", err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "error": "base de datos no disponible"})
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
 func (h *Handler) createEvent(w http.ResponseWriter, r *http.Request) {
@@ -88,20 +123,24 @@ func (h *Handler) createEvent(w http.ResponseWriter, r *http.Request) {
 
 	var e event.Event
 	if err := dec.Decode(&e); err != nil {
+		h.metrics.EventRejected("invalid")
 		writeError(w, http.StatusBadRequest, "JSON inválido: "+err.Error())
 		return
 	}
 	if err := e.Validate(); err != nil {
+		h.metrics.EventRejected("invalid")
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
 
 	if err := h.submitter.Submit(e); err != nil {
 		h.logger.Warn("cola llena, evento rechazado", "ip", e.IP)
+		h.metrics.EventRejected("queue_full")
 		w.Header().Set("Retry-After", "1")
 		writeError(w, http.StatusServiceUnavailable, "servidor ocupado, reintente")
 		return
 	}
+	h.metrics.EventAccepted()
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
 }
 

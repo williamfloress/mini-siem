@@ -35,12 +35,21 @@ type Notifier interface {
 	Enqueue(a detector.Alert)
 }
 
+// Observer recibe lo que pasa dentro de los workers (para métricas). Sus métodos
+// deben ser rápidos y no bloquear.
+type Observer interface {
+	EventStored()
+	EventStoreFailed()
+	AlertRaised(rule string)
+}
+
 type Pipeline struct {
 	queue     chan event.Event
 	store     Store
 	detectors []Detector
 	alerts    AlertSink
 	notifier  Notifier // puede ser nil: sin notificaciones externas
+	observer  Observer // puede ser nil: sin métricas
 	logger    *slog.Logger
 	wg        sync.WaitGroup
 }
@@ -54,6 +63,21 @@ func New(store Store, detectors []Detector, alerts AlertSink, notifier Notifier,
 		notifier:  notifier,
 		logger:    logger,
 	}
+}
+
+// SetObserver conecta las métricas. Debe llamarse antes de Start.
+func (p *Pipeline) SetObserver(o Observer) {
+	p.observer = o
+}
+
+// QueueLen es la cantidad de eventos esperando en la cola.
+func (p *Pipeline) QueueLen() int {
+	return len(p.queue)
+}
+
+// QueueCap es la capacidad de la cola.
+func (p *Pipeline) QueueCap() int {
+	return cap(p.queue)
 }
 
 func (p *Pipeline) Start(workers int) {
@@ -81,7 +105,13 @@ func (p *Pipeline) process(worker int, e event.Event) {
 		// El cliente ya recibió 202: el evento se pierde. Se registra para poder rastrearlo.
 		p.logger.Error("no se pudo guardar el evento",
 			"worker", worker, "type", e.Type, "ip", e.IP, "error", err)
+		if p.observer != nil {
+			p.observer.EventStoreFailed()
+		}
 		return
+	}
+	if p.observer != nil {
+		p.observer.EventStored()
 	}
 	p.logger.Info("evento procesado",
 		"worker", worker, "id", saved.ID, "type", saved.Type, "ip", saved.IP)
@@ -109,6 +139,9 @@ func (p *Pipeline) raise(worker int, a detector.Alert) {
 	p.logger.Warn("ALERTA",
 		"id", saved.ID, "rule", saved.Rule, "ip", saved.IP, "count", saved.Count, "worker", worker)
 
+	if p.observer != nil {
+		p.observer.AlertRaised(saved.Rule)
+	}
 	if p.notifier != nil {
 		p.notifier.Enqueue(saved)
 	}

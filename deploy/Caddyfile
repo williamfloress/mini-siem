@@ -1,0 +1,38 @@
+# Caddy pide y renueva solo el certificado de Let's Encrypt para SIEM_DOMAIN, y
+# redirige HTTP a HTTPS. Las variables {$...} vienen de compose.yml (y este, de .env).
+
+{$SIEM_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		-Server
+	}
+
+	# Ingesta de los agentes: la protege la API key del propio SIEM (y su rate limit).
+	@ingest {
+		method POST
+		path /events
+	}
+	handle @ingest {
+		reverse_proxy app:8080
+	}
+
+	# Para monitores externos (UptimeRobot, el smoke test del despliegue). No revela datos.
+	handle /healthz {
+		reverse_proxy app:8080
+	}
+
+	# Todo lo demás (panel, GET /events, /alerts, /stats, /metrics, /readyz) muestra datos
+	# de los eventos: va detrás de usuario y contraseña. El navegador reutiliza las
+	# credenciales en los fetch del panel, que son del mismo origen.
+	handle {
+		basic_auth {
+			{$PANEL_USER} {$PANEL_PASSWORD_HASH}
+		}
+		reverse_proxy app:8080
+	}
+}

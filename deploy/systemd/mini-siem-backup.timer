@@ -1,0 +1,11 @@
+[Unit]
+Description=mini-siem: copia de seguridad diaria de PostgreSQL
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+# Si el VPS estaba apagado a esa hora, la copia se hace al arrancar.
+Persistent=true
+RandomizedDelaySec=15min
+
+[Install]
+WantedBy=timers.target

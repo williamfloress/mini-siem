@@ -1,0 +1,67 @@
+# Producción: Caddy (HTTPS) + app + PostgreSQL. Vive en /opt/mini-siem del VPS junto a
+# un .env con los secretos (ver .env.example). Lo actualiza deploy.sh desde GitHub Actions.
+#
+#   docker compose up -d --wait      levantar o actualizar
+#   docker compose logs -f app       ver los logs del SIEM
+
+# Distinto del proyecto de desarrollo (docker-compose.yml de la raíz): si los dos se
+# llamaran igual, compartirían contenedores y volúmenes en una misma máquina.
+name: mini-siem-prod
+
+services:
+  caddy:
+    # Etiqueta de versión mayor a propósito: el proxy expuesto a internet debe recibir
+    # los parches de seguridad de Caddy 2 en cada despliegue.
+    image: caddy:2-alpine
+    ports:
+      - "80:80"       # redirección a HTTPS y desafío de Let's Encrypt
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    environment:
+      SIEM_DOMAIN: ${SIEM_DOMAIN:?falta SIEM_DOMAIN en .env}
+      PANEL_USER: ${PANEL_USER:?falta PANEL_USER en .env}
+      PANEL_PASSWORD_HASH: ${PANEL_PASSWORD_HASH:?falta PANEL_PASSWORD_HASH en .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data     # certificados: si se pierden, se piden otra vez (con límite de Let's Encrypt)
+      - caddy_config:/config
+    depends_on:
+      - app
+    restart: unless-stopped
+
+  app:
+    image: ghcr.io/williamfloress/mini-siem:${IMAGE_TAG:-latest}
+    # Sin "ports": solo se llega a la app a través de Caddy, por la red interna de compose.
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://siem:${POSTGRES_PASSWORD:?falta POSTGRES_PASSWORD en .env}@postgres:5432/siem?sslmode=disable
+      # En producción la ingesta nunca va abierta.
+      INGEST_API_KEY: ${INGEST_API_KEY:?falta INGEST_API_KEY en .env}
+      # Todo llega desde Caddy: la IP real del cliente viene en X-Forwarded-For.
+      TRUST_PROXY: "true"
+      PORT: "8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: siem
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?falta POSTGRES_PASSWORD en .env}
+      POSTGRES_DB: siem
+    # Sin "ports": la base no se publica en el host (Docker se salta ufw al publicar puertos).
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U siem -d siem"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,10 @@
+[Unit]
+Description=mini-siem: copia de seguridad de PostgreSQL
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# El usuario de despliegue (setup-vps.sh lo cambia si no se llama "deploy").
+User=deploy
+ExecStart=/opt/mini-siem/backup.sh

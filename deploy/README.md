@@ -1,5 +1,7 @@
 # Guía de despliegue: de cero a una URL pública, gratis
 
+> **Nota:** el proyecto no está desplegado actualmente. Esta guía documenta el camino previsto y los archivos de esta carpeta están listos, pero no logré completar el alta en un VPS gratuito. Para ver el SIEM funcionando en local, consulta el [Inicio rápido](../README.md#inicio-rápido).
+
 Esta guía parte de que **no tienes ninguna cuenta**. Al final tendrás el SIEM en línea con HTTPS, el agente vigilando el SSH del servidor y cada `git push` a `main` desplegándose solo.
 
 **Lo que usarás (todo gratis):** [Oracle Cloud Always Free](https://www.oracle.com/cloud/free/) para el servidor, [DuckDNS](https://www.duckdns.org) para el subdominio y GitHub para el despliegue automático. Los comandos de tu máquina son para **PowerShell** (Windows); los del servidor, para Linux.

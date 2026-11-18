@@ -4,9 +4,20 @@
 
 Un SIEM pequeño escrito en Go. Recibe eventos de seguridad (logins SSH, peticiones nginx, eventos de aplicación), los procesa en paralelo y detecta patrones sospechosos: fuerza bruta, cuentas posiblemente comprometidas y escaneos de rutas. Las alertas se guardan en PostgreSQL, llegan por Telegram y se ven en un panel web.
 
-Es un proyecto de aprendizaje y portafolio: se construye por fases, desde un servidor HTTP mínimo hasta un sistema desplegado que recibe eventos reales de un servidor Linux.
+Es un proyecto de aprendizaje y portafolio, construido por fases: desde un servidor HTTP mínimo hasta un agente que lee los logs SSH de un servidor Linux y un stack de producción con HTTPS, copias de seguridad y despliegue continuo.
 
-> **Estado:** fases 0 a 7 completas en código (ingesta, cola concurrente, detección, persistencia, notificaciones, panel, seguridad de la API, métricas, Docker, CI, agente y despliegue continuo). Falta ponerlo en línea en un VPS. Ver [Hoja de ruta](#hoja-de-ruta).
+> **Estado:** completo y funcional en local. El stack de producción (`deploy/`) está listo, pero el proyecto no está publicado en un servidor: no hay demo en línea. Para verlo funcionando bastan dos comandos, ver [Inicio rápido](#inicio-rápido).
+
+![Panel de mini-siem con alertas de fuerza bruta, escaneo y cuenta comprometida](docs/img/panel.png)
+
+<details>
+<summary>Tema oscuro</summary>
+
+![Panel de mini-siem en tema oscuro](docs/img/panel-oscuro.png)
+
+</details>
+
+Los datos de la captura los genera [`cmd/demo`](cmd/demo): tres horas de tráfico normal y cinco ataques. Arriba, la cadena completa de un ataque exitoso desde `198.51.100.23`: siete contraseñas fallidas para `deploy` en 24 segundos (`brute_force`) y, poco después, un login aceptado (`possible_compromise`).
 
 ---
 
@@ -96,7 +107,19 @@ En PowerShell, el paso 2 es `Copy-Item .env.example .env`.
 
 Sin `DATABASE_URL` (vacía en `.env` o sin `.env`), el servidor arranca en **modo memoria**: funciona igual, pero los datos se pierden al reiniciar. Es útil para probar algo rápido sin Docker.
 
-### Simular un ataque
+### Llenar el panel con datos de demo
+
+Con el servidor corriendo, en otra terminal:
+
+```bash
+go run ./cmd/demo
+```
+
+Envía 88 eventos con marcas de tiempo de las últimas tres horas (logins de administradores, visitas a la web, eventos de la aplicación) y cinco ataques: tres de fuerza bruta (uno desde IPv6), un escaneo de rutas como `/.env` y `/wp-admin`, y una fuerza bruta que termina en login exitoso. Produce las cinco alertas de la captura de arriba; los intentos sueltos que no cruzan el umbral quedan en el panel sin alerta.
+
+Usa el `INGEST_API_KEY` del entorno o del `.env`, igual que el servidor, y `-url` (o `SIEM_URL`) para apuntar a otro servidor. Cada ejecución vuelve a enviar el escenario completo, así que conviene correrlo con la base vacía o en modo memoria.
+
+### Simular un ataque a mano
 
 Envía seis logins fallidos desde la misma IP. Si configuraste `INGEST_API_KEY`, ponla en `KEY`; si no, la cabecera se ignora:
 
@@ -178,7 +201,9 @@ Otros detalles:
 
 ## Despliegue
 
-El SIEM en producción corre en un VPS con Docker Compose: **Caddy** delante (HTTPS automático con Let's Encrypt y usuario/contraseña para el panel), la app y PostgreSQL sin puertos publicados, copias diarias con un temporizador de systemd y el agente vigilando el SSH del propio servidor. Cada commit de `main` que pasa el CI se despliega solo con GitHub Actions, y si la versión nueva no arranca sana se vuelve a la anterior.
+> El proyecto no está desplegado: no encontré un VPS gratuito utilizable. Todo lo de esta sección está escrito y listo para usarse en cuanto haya un servidor.
+
+El stack de producción está pensado para un VPS con Docker Compose: **Caddy** delante (HTTPS automático con Let's Encrypt y usuario/contraseña para el panel), la app y PostgreSQL sin puertos publicados, copias diarias con un temporizador de systemd y el agente vigilando el SSH del propio servidor. Cada commit de `main` que pasa el CI se desplegaría solo con GitHub Actions, y si la versión nueva no arranca sana se vuelve a la anterior. Mientras no se configure la variable `DEPLOY_HOST` del repo, el workflow de despliegue no hace nada.
 
 La guía paso a paso está en [`deploy/README.md`](deploy/README.md).
 
@@ -407,6 +432,7 @@ Usan la base `siem_test`, que se crea con el contenedor, porque vacían las tabl
 ```
 cmd/server/            punto de entrada: configuración, arranque, apagado ordenado y healthcheck
 cmd/agent/             agente que sigue auth.log y envía los eventos al SIEM
+cmd/demo/              escenario de demo: tráfico normal y cinco ataques
 internal/
   agent/               parser de sshd, tail con rotación y cliente HTTP con reintentos
   api/                 handlers HTTP, API key, rate limit y validación de parámetros
@@ -421,6 +447,7 @@ internal/
   web/                 panel web (HTML embebido en el binario)
 docker/postgres/       script de inicialización de la base
 deploy/                producción: compose con Caddy, scripts, systemd y guía del VPS
+docs/img/              capturas del panel
 .github/workflows/     CI (lint, tests, imagen) y despliegue continuo
 Dockerfile             imagen multi-stage (distroless, sin root)
 ```
@@ -471,10 +498,10 @@ Dockerfile             imagen multi-stage (distroless, sin root)
 | 4 | PostgreSQL, migraciones, pool de conexiones, configuración por entorno | ✅ |
 | 5 | Notificaciones por Telegram, panel web, estadísticas, reglas de compromiso y escaneo | ✅ |
 | 6 | Dockerfile, CI con GitHub Actions, API key, rate limiting, timeouts, `/readyz` y `/metrics` | ✅ |
-| 7 | Agente que lee `/var/log/auth.log` en tiempo real y despliegue en un VPS con HTTPS | 🚧 código listo, falta el VPS |
+| 7 | Agente que lee `/var/log/auth.log` en tiempo real, stack de producción con HTTPS y despliegue continuo | ✅ código y guía; sin publicar |
 | 8 | Benchmark de rendimiento y caso de estudio | ⏳ |
 
-El producto final: un agente en un servidor Linux envía cada intento de login SSH al SIEM; el SIEM detecta los ataques, avisa por Telegram o correo y los muestra en un dashboard público.
+La idea original era tener el agente en un servidor Linux público, con el panel mostrando ataques reales a su SSH. Queda pendiente de conseguir un VPS; mientras tanto, [`cmd/demo`](cmd/demo) reproduce esos ataques en local.
 
 ---
 

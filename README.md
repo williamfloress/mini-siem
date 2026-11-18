@@ -6,7 +6,7 @@ Un SIEM pequeño escrito en Go. Recibe eventos de seguridad (logins SSH, peticio
 
 Es un proyecto de aprendizaje y portafolio: se construye por fases, desde un servidor HTTP mínimo hasta un sistema desplegado que recibe eventos reales de un servidor Linux.
 
-> **Estado:** fases 0 a 6 completas (ingesta, cola concurrente, detección, persistencia, notificaciones, panel, seguridad de la API, métricas, Docker y CI). El agente y el despliegue están en desarrollo. Ver [Hoja de ruta](#hoja-de-ruta).
+> **Estado:** fases 0 a 7 completas en código (ingesta, cola concurrente, detección, persistencia, notificaciones, panel, seguridad de la API, métricas, Docker, CI, agente y despliegue continuo). Falta ponerlo en línea en un VPS. Ver [Hoja de ruta](#hoja-de-ruta).
 
 ---
 
@@ -135,6 +135,52 @@ Si ahora esa IP inicia sesión con éxito, salta la alerta más grave, `possible
 ```bash
 curl -s -X POST localhost:8080/events -H "Authorization: Bearer $KEY" -d '{"timestamp":"2026-11-16T10:00:30Z","source":"ssh","type":"login_success","ip":"203.0.113.7","user":"root"}'
 ```
+
+---
+
+## Agente
+
+[`cmd/agent`](cmd/agent) es un binario aparte que corre en el servidor Linux a vigilar. Sigue `/var/log/auth.log` como `tail -F`, convierte las líneas de `sshd` en eventos y los envía a `POST /events` con la API key.
+
+```bash
+# En el servidor vigilado
+SIEM_URL=https://siem.tudominio.com INGEST_API_KEY=... mini-siem-agent
+
+# Probar el parser con un log cualquiera, sin enviar nada
+go run ./cmd/agent -dry-run -from-start -once -log ./auth.log
+```
+
+| Línea de `sshd` | Evento |
+|---|---|
+| `Failed password for [invalid user] X from IP` | `login_failed` (una por contraseña) |
+| `Connection closed by` / `Disconnected from` `invalid\|authenticating user X IP ... [preauth]` sin contraseña fallida antes | `login_failed` (una por conexión) |
+| `Accepted <método> for X from IP` | `login_success` |
+
+**Por qué cuenta las conexiones cerradas.** En un servidor que solo acepta claves no hay contraseñas que rechazar: los bots se conectan, piden un usuario y se van, y nunca aparece `Failed password`. Por eso una conexión que se cierra antes de autenticarse cuenta como un intento. Si la conexión ya tuvo contraseñas fallidas, el cierre no suma otro: el agente agrupa las líneas por el PID de `sshd` (uno por conexión), así que cada intento se cuenta una sola vez, acepte o no contraseñas el servidor.
+
+Otros detalles:
+
+- **Formatos.** Entiende las fechas clásicas de syslog (`Nov 17 10:00:01`, en la zona horaria del servidor y deduciendo el año) y las RFC 3339 de Debian 12 y Ubuntu 24.04, y el proceso `sshd-session` de OpenSSH 9.8+.
+- **Rotación.** Detecta cuándo logrotate renombra el archivo (y termina de leer el viejo antes de pasar al nuevo) o lo vacía (`copytruncate`). Mira el archivo cada 500 ms en vez de usar inotify: es suficiente para un log de autenticación y no necesita dependencias.
+- **Reintentos sin pérdida.** Si el SIEM no responde, o responde `429`, `503` o `5xx`, el agente reintenta con espera exponencial (hasta 30 s, respetando `Retry-After`) y mientras tanto no lee más líneas: las pendientes siguen en el archivo. Un `400`, `401` o `422` no se reintenta: el evento se descarta y queda en el log.
+- **Sin privilegios.** En producción corre con un usuario temporal de systemd que solo pertenece al grupo `adm` (ver [despliegue](deploy/README.md)).
+
+| Variable / opción | Por defecto | Descripción |
+|---|---|---|
+| `SIEM_URL` | *(requerida)* | URL base del SIEM. Con `http` (salvo `localhost`) avisa de que la API key viaja sin cifrar |
+| `INGEST_API_KEY` | *(vacía)* | La misma clave que el servidor |
+| `AUTH_LOG` / `-log` | `/var/log/auth.log` | Archivo a seguir |
+| `-from-start` | `false` | Leer el archivo desde el principio, no solo lo nuevo |
+| `-once` | `false` | Terminar al llegar al final |
+| `-dry-run` | `false` | Imprimir los eventos en JSON en lugar de enviarlos |
+
+---
+
+## Despliegue
+
+El SIEM en producción corre en un VPS con Docker Compose: **Caddy** delante (HTTPS automático con Let's Encrypt y usuario/contraseña para el panel), la app y PostgreSQL sin puertos publicados, copias diarias con un temporizador de systemd y el agente vigilando el SSH del propio servidor. Cada commit de `main` que pasa el CI se despliega solo con GitHub Actions, y si la versión nueva no arranca sana se vuelve a la anterior.
+
+La guía paso a paso está en [`deploy/README.md`](deploy/README.md).
 
 ---
 
@@ -327,6 +373,8 @@ docker run --rm -p 8080:8080 -e DATABASE_URL=... -e INGEST_API_KEY=... mini-siem
 | `test` | `go vet` y `go test -race` contra un PostgreSQL 17 real (contenedor de servicio), así que los tests de integración también corren |
 | `docker` | Construye la imagen (sin publicarla), solo si los dos anteriores pasan |
 
+Si el CI pasa en `main`, el workflow [Deploy](.github/workflows/deploy.yml) publica la imagen en `ghcr.io` y la despliega en el VPS (ver [Despliegue](#despliegue)). No hace nada hasta que se configura la variable `DEPLOY_HOST` del repo.
+
 Para correr el lint en local sin instalar nada:
 
 ```bash
@@ -358,7 +406,9 @@ Usan la base `siem_test`, que se crea con el contenedor, porque vacían las tabl
 
 ```
 cmd/server/            punto de entrada: configuración, arranque, apagado ordenado y healthcheck
+cmd/agent/             agente que sigue auth.log y envía los eventos al SIEM
 internal/
+  agent/               parser de sshd, tail con rotación y cliente HTTP con reintentos
   api/                 handlers HTTP, API key, rate limit y validación de parámetros
   config/              lectura de variables de entorno
   db/                  pool de conexiones y migraciones (goose)
@@ -370,7 +420,8 @@ internal/
   store/               almacenamiento: PostgreSQL y memoria
   web/                 panel web (HTML embebido en el binario)
 docker/postgres/       script de inicialización de la base
-.github/workflows/     CI: lint, tests y build de la imagen
+deploy/                producción: compose con Caddy, scripts, systemd y guía del VPS
+.github/workflows/     CI (lint, tests, imagen) y despliegue continuo
 Dockerfile             imagen multi-stage (distroless, sin root)
 ```
 
@@ -396,7 +447,9 @@ Dockerfile             imagen multi-stage (distroless, sin root)
 ## Limitaciones conocidas
 
 - Si la base de datos falla después de responder `202`, el evento se pierde (queda registrado en el log). Las soluciones posibles son reintentos en el worker o una cola persistente.
-- El panel, los `GET` y `/metrics` no tienen autenticación: cualquiera que llegue al puerto ve los eventos. Antes de exponerlo a internet hay que protegerlos (por ejemplo, con autenticación básica en el proxy, fase 7).
+- El panel, los `GET` y `/metrics` no tienen autenticación en la app. En producción los protege Caddy con usuario y contraseña; si expones el puerto 8080 directamente, cualquiera ve los eventos.
+- El agente no guarda su posición en el archivo: al arrancar empieza por las líneas nuevas, así que lo que se escribió mientras estaba parado no se envía.
+- Un evento que el SIEM rechaza (por ejemplo, con la API key mal configurada) se descarta en el agente; queda en su log, pero no se reenvía.
 - La API key es una sola, compartida por todos los agentes. Revocar un agente obliga a cambiarla en todos.
 - Con la base caída, `POST /events` sigue respondiendo `202` y los eventos se pierden. `/readyz` y `siem_events_store_failed_total` lo hacen visible, pero la API no los rechaza.
 - El estado del rate limiter vive en la memoria de cada proceso: con varias réplicas, cada una aplica su propio límite.
@@ -418,7 +471,7 @@ Dockerfile             imagen multi-stage (distroless, sin root)
 | 4 | PostgreSQL, migraciones, pool de conexiones, configuración por entorno | ✅ |
 | 5 | Notificaciones por Telegram, panel web, estadísticas, reglas de compromiso y escaneo | ✅ |
 | 6 | Dockerfile, CI con GitHub Actions, API key, rate limiting, timeouts, `/readyz` y `/metrics` | ✅ |
-| 7 | Agente que lee `/var/log/auth.log` en tiempo real y despliegue en un VPS con HTTPS | ⏳ |
+| 7 | Agente que lee `/var/log/auth.log` en tiempo real y despliegue en un VPS con HTTPS | 🚧 código listo, falta el VPS |
 | 8 | Benchmark de rendimiento y caso de estudio | ⏳ |
 
 El producto final: un agente en un servidor Linux envía cada intento de login SSH al SIEM; el SIEM detecta los ataques, avisa por Telegram o correo y los muestra en un dashboard público.
@@ -427,4 +480,4 @@ El producto final: un agente en un servidor Linux envía cada intento de login S
 
 ## Tecnologías
 
-Go (biblioteca estándar: `net/http`, `log/slog`, `embed`) · PostgreSQL 17 · [pgx](https://github.com/jackc/pgx) · [goose](https://github.com/pressly/goose) · [x/time/rate](https://pkg.go.dev/golang.org/x/time/rate) · [Prometheus client_golang](https://github.com/prometheus/client_golang) · Docker (distroless) · GitHub Actions · golangci-lint
+Go (biblioteca estándar: `net/http`, `log/slog`, `embed`) · PostgreSQL 17 · [pgx](https://github.com/jackc/pgx) · [goose](https://github.com/pressly/goose) · [x/time/rate](https://pkg.go.dev/golang.org/x/time/rate) · [Prometheus client_golang](https://github.com/prometheus/client_golang) · Docker (distroless) · Caddy · systemd · GitHub Actions · golangci-lint

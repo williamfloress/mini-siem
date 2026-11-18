@@ -1,7 +1,10 @@
 # syntax=docker/dockerfile:1
 
 # --- Etapa 1: compilar ---
-FROM golang:1.27.4-alpine AS build
+# $BUILDPLATFORM: el compilador corre en la arquitectura de quien construye y compila de forma
+# cruzada para la de destino. Así una imagen arm64 se construye sin emulación (rápido).
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine AS build
+ARG TARGETOS TARGETARCH
 WORKDIR /src
 
 # Primero solo go.mod y go.sum: mientras no cambien las dependencias, Docker
@@ -14,7 +17,7 @@ COPY . .
 # -trimpath quita las rutas locales del binario; -s -w quita los símbolos de depuración.
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/mini-siem ./cmd/server
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/mini-siem ./cmd/server
 
 # --- Etapa 2: imagen final ---
 # distroless/static: sin shell, sin gestor de paquetes, solo certificados CA y zona horaria.

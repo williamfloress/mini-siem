@@ -55,6 +55,8 @@ jobs:
         with:
           context: .
           push: true
+          # arm64 para el VPS de Oracle (Ampere); amd64 por si se cambia de proveedor.
+          platforms: linux/amd64,linux/arm64
           tags: |
             ${{ env.IMAGE }}:${{ env.SHA }}
             ${{ env.IMAGE }}:latest
@@ -81,9 +83,6 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Compilar el agente
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o mini-siem-agent ./cmd/agent
-
       - name: Configurar SSH
         env:
           SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
@@ -95,6 +94,18 @@ jobs:
           # Huella del servidor fijada de antemano: sin ella, un atacante en medio podría
           # hacerse pasar por el VPS y recibir el token de ghcr.io.
           printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      # El agente corre fuera de Docker, así que hay que compilarlo para la arquitectura
+      # del VPS. Se le pregunta al propio servidor para no tener que configurarlo.
+      - name: Compilar el agente
+        run: |
+          case "$(ssh "$TARGET" uname -m)" in
+            aarch64) arch=arm64 ;;
+            x86_64) arch=amd64 ;;
+            *) echo "arquitectura no soportada" >&2; exit 1 ;;
+          esac
+          echo "VPS: $arch"
+          CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -ldflags="-s -w" -o mini-siem-agent ./cmd/agent
 
       - name: Copiar archivos
         run: |

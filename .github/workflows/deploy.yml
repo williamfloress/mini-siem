@@ -1,0 +1,120 @@
+name: Deploy
+
+# Despliega cada commit de main que pase el CI: publica la imagen en ghcr.io y, por
+# SSH, actualiza el VPS con deploy/deploy.sh. También se puede lanzar a mano.
+#
+# Configuración del repositorio (Settings > Secrets and variables > Actions):
+#   variables: DEPLOY_HOST (IP o nombre del VPS), SIEM_DOMAIN, DEPLOY_USER (opcional, "deploy")
+#   secretos:  DEPLOY_SSH_KEY (clave privada), DEPLOY_KNOWN_HOSTS (salida de ssh-keyscan)
+# Mientras DEPLOY_HOST no exista, el workflow no hace nada.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Nunca dos despliegues a la vez, y uno en curso no se cancela a la mitad.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+  # workflow_run corre sobre main, no sobre el commit que pasó el CI: hay que fijarlo.
+  SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+jobs:
+  image:
+    if: >-
+      vars.DEPLOY_HOST != '' && (
+        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+        github.event.workflow_run.conclusion == 'success'
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # publicar en ghcr.io
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SHA }}
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # La etiqueta es el SHA: cada despliegue apunta a una imagen exacta y volver atrás
+      # es desplegar el SHA anterior.
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ env.SHA }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: image
+    runs-on: ubuntu-latest
+    # El environment permite exigir aprobación manual antes de desplegar (Settings > Environments).
+    environment:
+      name: production
+      url: https://${{ vars.SIEM_DOMAIN }}
+    permissions:
+      contents: read
+      packages: read # el VPS descarga la imagen con este token
+    env:
+      TARGET: ${{ vars.DEPLOY_USER || 'deploy' }}@${{ vars.DEPLOY_HOST }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SHA }}
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Compilar el agente
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o mini-siem-agent ./cmd/agent
+
+      - name: Configurar SSH
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          # Huella del servidor fijada de antemano: sin ella, un atacante en medio podría
+          # hacerse pasar por el VPS y recibir el token de ghcr.io.
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Copiar archivos
+        run: |
+          scp deploy/compose.yml deploy/Caddyfile deploy/deploy.sh deploy/backup.sh "$TARGET:/opt/mini-siem/"
+          scp mini-siem-agent "$TARGET:/opt/mini-siem/bin/mini-siem-agent.new"
+
+      - name: Desplegar
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          # ACTOR y SHA se expanden aquí, en el runner, a propósito (y SHA es hexadecimal).
+          # shellcheck disable=SC2029
+          # El token caduca al terminar el job; aun así se borra del VPS al acabar.
+          printf '%s' "$TOKEN" | ssh "$TARGET" "docker login ghcr.io -u '$ACTOR' --password-stdin"
+          rc=0
+          # shellcheck disable=SC2029
+          ssh "$TARGET" "/opt/mini-siem/deploy.sh $SHA" || rc=$?
+          ssh "$TARGET" "docker logout ghcr.io" || true
+          exit $rc
+
+      - name: Comprobar desde fuera
+        run: curl -fsS --retry 10 --retry-delay 3 --retry-all-errors "https://${{ vars.SIEM_DOMAIN }}/healthz"

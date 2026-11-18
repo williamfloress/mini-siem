@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Prepara un VPS Debian 12+ o Ubuntu 24.04+ recién creado para el SIEM. Se ejecuta una
-# vez, como root, desde una copia de la carpeta deploy/:
+# Prepara un VPS Ubuntu 22.04+ o Debian 12+ recién creado para el SIEM. Se ejecuta una
+# vez, con sudo (o como root), desde una copia de la carpeta deploy/:
 #
-#   scp -r deploy root@VPS:/root/mini-siem-deploy
-#   ssh root@VPS bash /root/mini-siem-deploy/setup-vps.sh
+#   scp -r deploy ubuntu@VPS:~/mini-siem-deploy
+#   ssh ubuntu@VPS "sudo bash ~/mini-siem-deploy/setup-vps.sh"
 #
+# La guía completa, con la creación del servidor, está en deploy/README.md.
 # Se puede repetir: no pisa .env ni agent.env si ya existen.
 # No toca la configuración de SSH: eso se hace a mano (ver deploy/README.md), porque un
-# error ahí te deja fuera del servidor.
+# error ahí te deja fuera del servidor (en Oracle Cloud, además, ya viene sin contraseñas).
 set -euo pipefail
 
 DEPLOY_USER=${DEPLOY_USER:-deploy}
